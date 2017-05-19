@@ -1,9 +1,9 @@
-network-manager (1.8.0-1kolya1) UNRELEASED; urgency=medium
+network-manager (1.8.0-1kolya1) zesty; urgency=medium
 
 	* try things with bond
 	* upgrade to 1.8.0
 
- -- Nikolay Martynov <mar.kolya@gmail.com>  Fri, 05 May 2017 16:44:31 -0400
+ -- Nikolay Martynov <mar.kolya@gmail.com>  Thu, 18 May 2017 23:01:18 -0400
 
 network-manager (1.4.4-1ubuntu3) zesty; urgency=medium
 
