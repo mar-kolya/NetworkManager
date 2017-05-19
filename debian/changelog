@@ -1,3 +1,11 @@
+network-manager (1.9.1-dev-1~1.gbpb71ac8) UNRELEASED; urgency=medium
+
+  ** SNAPSHOT build @b71ac893b9e89f465c6d4a1e7487aea267db4024 **
+
+  * UNRELEASED
+
+ -- Nikolay Martynov <mar.kolya@gmail.com>  Thu, 18 May 2017 23:16:58 -0400
+
 network-manager (1.8.0-1kolya1) zesty; urgency=medium
 
 	* try things with bond
