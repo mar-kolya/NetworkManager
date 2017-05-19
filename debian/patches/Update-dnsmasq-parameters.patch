@@ -1,0 +1,48 @@
+From: =?utf-8?q?St=C3=A9phane_Graber?= <stephane.graber@canonical.com>
+Date: Thu, 12 May 2016 22:44:06 +0800
+Subject: Update dnsmasq parameters
+
+Disable caching since it's a potential security issue (local dns cache poisoning).
+
+See also: https://blueprints.launchpad.net/ubuntu/+spec/foundations-p-dns-resolving
+
+=== modified file 'src/dns-manager/nm-dns-dnsmasq.c'
+---
+ src/dns/nm-dns-dnsmasq.c | 2 +-
+ src/dns/nm-dns-manager.c | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/dns/nm-dns-dnsmasq.c b/src/dns/nm-dns-dnsmasq.c
+index 5223638..ca06f04 100644
+--- a/src/dns/nm-dns-dnsmasq.c
++++ b/src/dns/nm-dns-dnsmasq.c
+@@ -508,7 +508,7 @@ start_dnsmasq (NMDnsDnsmasq *self)
+ 	argv[idx++] = "--no-hosts"; /* don't use /etc/hosts to resolve */
+ 	argv[idx++] = "--bind-interfaces";
+ 	argv[idx++] = "--pid-file=" PIDFILE;
+-	argv[idx++] = "--listen-address=127.0.0.1"; /* Should work for both 4 and 6 */
++	argv[idx++] = "--listen-address=127.0.1.1"; /* Should work for both 4 and 6 */
+ 	argv[idx++] = "--cache-size=400";
+ 	argv[idx++] = "--clear-on-reload"; /* clear cache when dns server changes */
+ 	argv[idx++] = "--conf-file=/dev/null"; /* avoid loading /etc/dnsmasq.conf */
+diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
+index 1f7eb96..c0969b8 100644
+--- a/src/dns/nm-dns-manager.c
++++ b/src/dns/nm-dns-manager.c
+@@ -1170,14 +1170,14 @@ update_dns (NMDnsManager *self,
+ 		;
+ 	}
+ 
+-	/* If caching was successful, we only send 127.0.0.1 to /etc/resolv.conf
++	/* If caching was successful, we only send 127.0.1.1 to /etc/resolv.conf
+ 	 * to ensure that the glibc resolver doesn't try to round-robin nameservers,
+ 	 * but only uses the local caching nameserver.
+ 	 */
+ 	if (caching) {
+ 		g_strfreev (nameservers);
+ 		nameservers = g_new0 (char*, 2);
+-		nameservers[0] = g_strdup ("127.0.0.1");
++		nameservers[0] = g_strdup ("127.0.1.1");
+ 	}
+ 
+ 	if (update) {

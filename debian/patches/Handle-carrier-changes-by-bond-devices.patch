@@ -1,0 +1,140 @@
+From: Nikolay Martynov <mar.kolya@gmail.com>
+Date: Wed, 10 May 2017 22:31:17 -0400
+Subject: Handle carrier changes by bond devices
+
+This batch changes thy way carrier changes are handled by bond devices:
+* pulling cable out of one of the slaves brings slave into disconnected state.
+* reconnecting cable reconnects slave automatically.
+* pulling out cables of all slaves brings down bond interface - removing its IP configuration.
+* reconnecting cable to one of the slaves makes bond interface reistablish its IP configuration.
+
+With this patch bond interface is made to work like all any other interface supporting carrier.
+This patch has also been tested with bond interface havind one ethernet and one wifi device - and it works as expected.
+
+This patch allows one to have bond interface between wifi and ethernet and still be able to connect to other wifi networks and not have ip config or routing clashes.
+
+Signed-off-by: Nikolay Martynov <mar.kolya@gmail.com>
+---
+ src/devices/nm-device-bond.c | 20 -----------------
+ src/devices/nm-device.c      | 53 +++++++++++++++++++++++++++-----------------
+ 2 files changed, 33 insertions(+), 40 deletions(-)
+
+diff --git a/src/devices/nm-device-bond.c b/src/devices/nm-device-bond.c
+index 3325c94..d2b7b2f 100644
+--- a/src/devices/nm-device-bond.c
++++ b/src/devices/nm-device-bond.c
+@@ -58,24 +58,6 @@ get_generic_capabilities (NMDevice *dev)
+ }
+ 
+ static gboolean
+-is_available (NMDevice *dev, NMDeviceCheckDevAvailableFlags flags)
+-{
+-	return TRUE;
+-}
+-
+-static gboolean
+-check_connection_available (NMDevice *device,
+-                            NMConnection *connection,
+-                            NMDeviceCheckConAvailableFlags flags,
+-                            const char *specific_object)
+-{
+-	/* Connections are always available because the carrier state is determined
+-	 * by the slave carrier states, not the bonds's state.
+-	 */
+-	return TRUE;
+-}
+-
+-static gboolean
+ check_connection_compatible (NMDevice *device, NMConnection *connection)
+ {
+ 	NMSettingBond *s_bond;
+@@ -623,9 +605,7 @@ nm_device_bond_class_init (NMDeviceBondClass *klass)
+ 	NM_DEVICE_CLASS_DECLARE_TYPES (klass, NM_SETTING_BOND_SETTING_NAME, NM_LINK_TYPE_BOND)
+ 
+ 	parent_class->get_generic_capabilities = get_generic_capabilities;
+-	parent_class->is_available = is_available;
+ 	parent_class->check_connection_compatible = check_connection_compatible;
+-	parent_class->check_connection_available = check_connection_available;
+ 	parent_class->complete_connection = complete_connection;
+ 
+ 	parent_class->update_connection = update_connection;
+diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
+index da581a0..d56e329 100644
+--- a/src/devices/nm-device.c
++++ b/src/devices/nm-device.c
+@@ -2182,24 +2182,33 @@ carrier_changed (NMDevice *self, gboolean carrier)
+ 		return;
+ 
+ 	if (priv->is_master) {
+-		/* Bridge/bond/team carrier does not affect its own activation,
+-		 * but when carrier comes on, if there are slaves waiting,
+-		 * it will restart them.
+-		 */
+-		if (!carrier)
+-			return;
+-
+-		if (nm_device_activate_ip4_state_in_wait (self))
+-			nm_device_activate_stage3_ip4_start (self);
+-		if (nm_device_activate_ip6_state_in_wait (self))
+-			nm_device_activate_stage3_ip6_start (self);
+-
+-		return;
+-	} else if (nm_device_get_enslaved (self) && !carrier) {
+-		/* Slaves don't deactivate when they lose carrier; for
+-		 * bonds/teams in particular that would be actively
+-		 * counterproductive.
+-		 */
++		if (carrier) {
++			/* Force master to retry getting ip addresses when carrier
++			 * is restored.
++			 */
++			if (priv->state == NM_DEVICE_STATE_ACTIVATED) {
++				nm_device_update_dynamic_ip_setup (self);
++			} else {
++				if (nm_device_activate_ip4_state_in_wait (self))
++					nm_device_activate_stage3_ip4_start (self);
++				if (nm_device_activate_ip6_state_in_wait (self))
++					nm_device_activate_stage3_ip6_start (self);
++			}
++		} else {
++			/* Put master device into DISCONNECTED state if there is
++			 * no carrier. This would mean that all slaves are still
++			 * enslaved. This is nessesary to be able to reconnect
++			 * when carrier appears.
++			 */
++			if (priv->state == NM_DEVICE_STATE_DISCONNECTED) {
++				if (   priv->queued_state.id
++					&& priv->queued_state.state >= NM_DEVICE_STATE_PREPARE)
++					queued_state_clear (self);
++			} else {
++				nm_device_queue_state (self, NM_DEVICE_STATE_DISCONNECTED,
++									   NM_DEVICE_STATE_REASON_CARRIER);
++			}
++		}
+ 		return;
+ 	}
+ 
+@@ -3726,7 +3735,7 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+ {
+ 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+ 
+-	if (priv->carrier || priv->ignore_carrier)
++	if (priv->carrier || priv->ignore_carrier || priv->is_master)
+ 		return TRUE;
+ 
+ 	if (NM_FLAGS_HAS (flags, _NM_DEVICE_CHECK_DEV_AVAILABLE_IGNORE_CARRIER))
+@@ -11608,9 +11617,13 @@ check_connection_available (NMDevice *self,
+ 
+ 	/* Connections which require a network connection are not available when
+ 	 * the device has no carrier, even with ignore-carrer=TRUE.
++	 * If this is master connection we assume it is available even if it
++	 * doesn't have carrier. Making connection non-available would for
++	 * NM to un-enslave slaves which is not desired.
+ 	 */
+ 	if (   priv->carrier
+-	    || !connection_requires_carrier (connection))
++		|| priv->is_master
++		|| !connection_requires_carrier (connection))
+ 		return TRUE;
+ 
+ 	if (   NM_FLAGS_HAS (flags, _NM_DEVICE_CHECK_CON_AVAILABLE_FOR_USER_REQUEST_WAITING_CARRIER)

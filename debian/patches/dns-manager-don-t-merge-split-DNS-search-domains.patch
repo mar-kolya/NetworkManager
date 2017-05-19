@@ -1,0 +1,88 @@
+From: Mathieu Trudel-Lapierre <mathieu.trudel-lapierre@canonical.com>
+Date: Wed, 15 Jun 2016 16:07:27 +0300
+Subject: dns-manager: don't merge split-DNS search domains
+
+Signed-off-by: Mathieu Trudel-Lapierre <mathieu.trudel-lapierre@canonical.com>
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/network-manager/+bug/1592721
+---
+ src/dns/nm-dns-manager.c | 36 ++++++++++++++++++++----------------
+ 1 file changed, 20 insertions(+), 16 deletions(-)
+
+diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
+index c0969b8..3fef506 100644
+--- a/src/dns/nm-dns-manager.c
++++ b/src/dns/nm-dns-manager.c
+@@ -291,7 +291,7 @@ add_dns_option_item (GPtrArray *array, const char *str, gboolean ipv6)
+ }
+ 
+ static void
+-merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
++merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src, gboolean never_default)
+ {
+ 	guint32 num, num_domains, num_searches, i;
+ 
+@@ -304,13 +304,15 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ 	num_domains = nm_ip4_config_get_num_domains (src);
+ 	num_searches = nm_ip4_config_get_num_searches (src);
+ 
+-	for (i = 0; i < num_searches; i++) {
+-		const char *search;
++        if(!never_default) {
++	        for (i = 0; i < num_searches; i++) {
++		        const char *search;
+ 
+-		search = nm_ip4_config_get_search (src, i);
+-		if (!domain_is_valid (search))
+-			continue;
+-		add_string_item (rc->searches, search);
++		        search = nm_ip4_config_get_search (src, i);
++		        if (!domain_is_valid (search))
++			        continue;
++		        add_string_item (rc->searches, search);
++                }
+ 	}
+ 
+ 	if (num_domains > 1 || !num_searches) {
+@@ -347,7 +349,7 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ }
+ 
+ static void
+-merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
++merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface, gboolean never_default)
+ {
+ 	guint32 num, num_domains, num_searches, i;
+ 
+@@ -374,13 +376,15 @@ merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
+ 	num_domains = nm_ip6_config_get_num_domains (src);
+ 	num_searches = nm_ip6_config_get_num_searches (src);
+ 
+-	for (i = 0; i < num_searches; i++) {
+-		const char *search;
++        if (!never_default) {
++	        for (i = 0; i < num_searches; i++) {
++		        const char *search;
+ 
+-		search = nm_ip6_config_get_search (src, i);
+-		if (!domain_is_valid (search))
+-			continue;
+-		add_string_item (rc->searches, search);
++		        search = nm_ip6_config_get_search (src, i);
++		        if (!domain_is_valid (search))
++			        continue;
++		        add_string_item (rc->searches, search);
++                }
+ 	}
+ 
+ 	if (num_domains > 1 || !num_searches) {
+@@ -408,9 +412,9 @@ merge_one_ip_config_data (NMResolvConfData *rc,
+                           NMDnsIPConfigData *data)
+ {
+ 	if (NM_IS_IP4_CONFIG (data->config))
+-		merge_one_ip4_config (rc, (NMIP4Config *) data->config);
++		merge_one_ip4_config (rc, (NMIP4Config *) data->config, nm_ip4_config_get_never_default (data->config));
+ 	else if (NM_IS_IP6_CONFIG (data->config))
+-		merge_one_ip6_config (rc, (NMIP6Config *) data->config, data->iface);
++		merge_one_ip6_config (rc, (NMIP6Config *) data->config, data->iface, nm_ip6_config_get_never_default (data->config));
+ 	else
+ 		g_return_if_reached ();
+ }
