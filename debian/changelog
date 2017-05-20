@@ -1,11 +1,13 @@
-network-manager (1.9.1-dev-1~3.gbp9cf11c) UNRELEASED; urgency=medium
+network-manager (1.9.1-dev-1~4.gbp9653de) UNRELEASED; urgency=medium
 
-  ** SNAPSHOT build @9cf11c30f40b81c41e453fe2b2ca002bbd77d952 **
+  ** SNAPSHOT build @9653debf3e2f1197d9e34ce5302379571ac2b6d1 **
 
   * UNRELEASED
   * Update changelog for 1.9.1-dev-1~1.gbpb71ac8 release
+  * Update changelog for 1.9.1-dev-1~3.gbp9cf11c release
+  * Rediff patches
 
- -- Nikolay Martynov <mar.kolya@gmail.com>  Fri, 19 May 2017 22:58:13 -0400
+ -- Nikolay Martynov <mar.kolya@gmail.com>  Fri, 19 May 2017 23:07:04 -0400
 
 network-manager (1.8.0-1kolya1) zesty; urgency=medium
 
