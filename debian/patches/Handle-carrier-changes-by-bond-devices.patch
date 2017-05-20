@@ -2,22 +2,23 @@ From: Nikolay Martynov <mar.kolya@gmail.com>
 Date: Wed, 10 May 2017 22:31:17 -0400
 Subject: Handle carrier changes by bond devices
 
-This batch changes thy way carrier changes are handled by bond devices:
-* pulling cable out of one of the slaves brings slave into disconnected state.
-* reconnecting cable reconnects slave automatically.
-* pulling out cables of all slaves brings down bond interface - removing its IP configuration.
-* reconnecting cable to one of the slaves makes bond interface reistablish its IP configuration.
+This batch changes the way carrier changes are handled by bond
+devices. With this patch:
+* Pulling cable out of one of the slaves brings slave into disconnected state.
+* Reconnecting cable reconnects slave automatically.
+* Pulling out cables of all slaves brings down bond interface - removing its IP configuration.
+* Reconnecting cable to one of the slaves makes bond interface reistablish its IP configuration.
 
-With this patch bond interface is made to work like all any other interface supporting carrier.
+With this patch bond interface is made to work like any other interface supporting carrier.
 This patch has also been tested with bond interface havind one ethernet and one wifi device - and it works as expected.
 
-This patch allows one to have bond interface between wifi and ethernet and still be able to connect to other wifi networks and not have ip config or routing clashes.
+This patch allows one to have bond interface between wifi and ethernet and stil be able to connect to other wifi networks and not have ip config or routing clashes.
 
 Signed-off-by: Nikolay Martynov <mar.kolya@gmail.com>
 ---
- src/devices/nm-device-bond.c | 20 -----------------
- src/devices/nm-device.c      | 53 +++++++++++++++++++++++++++-----------------
- 2 files changed, 33 insertions(+), 40 deletions(-)
+ src/devices/nm-device-bond.c | 20 ---------------
+ src/devices/nm-device.c      | 58 +++++++++++++++++++++++++++++---------------
+ 2 files changed, 38 insertions(+), 40 deletions(-)
 
 diff --git a/src/devices/nm-device-bond.c b/src/devices/nm-device-bond.c
 index 3325c94..d2b7b2f 100644
@@ -59,7 +60,7 @@ index 3325c94..d2b7b2f 100644
  
  	parent_class->update_connection = update_connection;
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index 97cb7f2..a25b833 100644
+index 97cb7f2..0743593 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -2195,24 +2195,33 @@ carrier_changed (NMDevice *self, gboolean carrier)
@@ -114,16 +115,21 @@ index 97cb7f2..a25b833 100644
  		return;
  	}
  
-@@ -3693,7 +3702,7 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+@@ -3693,7 +3702,12 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
  {
  	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
  
 -	if (priv->carrier || priv->ignore_carrier)
++	/* Device is available if:
++     * - carrier is present, or
++     * - carrier is ignored, or
++     * - device is master - master devices are always avaulable.
++	 */
 +	if (priv->carrier || priv->ignore_carrier || priv->is_master)
  		return TRUE;
  
  	if (NM_FLAGS_HAS (flags, _NM_DEVICE_CHECK_DEV_AVAILABLE_IGNORE_CARRIER))
-@@ -11590,9 +11599,13 @@ check_connection_available (NMDevice *self,
+@@ -11590,9 +11604,13 @@ check_connection_available (NMDevice *self,
  
  	/* Connections which require a network connection are not available when
  	 * the device has no carrier, even with ignore-carrer=TRUE.
