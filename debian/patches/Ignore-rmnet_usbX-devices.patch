@@ -7,10 +7,10 @@ Subject: Ignore rmnet_usbX devices.
  1 file changed, 6 insertions(+)
 
 diff --git a/src/nm-manager.c b/src/nm-manager.c
-index a740219..b3a9f33 100644
+index a845321..76350c7 100644
 --- a/src/nm-manager.c
 +++ b/src/nm-manager.c
-@@ -2324,6 +2324,12 @@ platform_link_added (NMManager *self,
+@@ -2307,6 +2307,12 @@ platform_link_added (NMManager *self,
  		}
  	}
  

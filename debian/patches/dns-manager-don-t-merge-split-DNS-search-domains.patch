@@ -9,7 +9,7 @@ Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/network-manager/+bug/15927
  1 file changed, 20 insertions(+), 16 deletions(-)
 
 diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
-index c0969b8..3fef506 100644
+index a5470aa..deac3d9 100644
 --- a/src/dns/nm-dns-manager.c
 +++ b/src/dns/nm-dns-manager.c
 @@ -291,7 +291,7 @@ add_dns_option_item (GPtrArray *array, const char *str, gboolean ipv6)

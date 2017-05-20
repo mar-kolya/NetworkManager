@@ -59,10 +59,10 @@ index 3325c94..d2b7b2f 100644
  
  	parent_class->update_connection = update_connection;
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index da581a0..d56e329 100644
+index 97cb7f2..a25b833 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
-@@ -2182,24 +2182,33 @@ carrier_changed (NMDevice *self, gboolean carrier)
+@@ -2195,24 +2195,33 @@ carrier_changed (NMDevice *self, gboolean carrier)
  		return;
  
  	if (priv->is_master) {
@@ -79,7 +79,7 @@ index da581a0..d56e329 100644
 -			nm_device_activate_stage3_ip6_start (self);
 -
 -		return;
--	} else if (nm_device_get_enslaved (self) && !carrier) {
+-	} else if (priv->is_enslaved && !carrier) {
 -		/* Slaves don't deactivate when they lose carrier; for
 -		 * bonds/teams in particular that would be actively
 -		 * counterproductive.
@@ -114,7 +114,7 @@ index da581a0..d56e329 100644
  		return;
  	}
  
-@@ -3726,7 +3735,7 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+@@ -3693,7 +3702,7 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
  {
  	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
  
@@ -123,7 +123,7 @@ index da581a0..d56e329 100644
  		return TRUE;
  
  	if (NM_FLAGS_HAS (flags, _NM_DEVICE_CHECK_DEV_AVAILABLE_IGNORE_CARRIER))
-@@ -11608,9 +11617,13 @@ check_connection_available (NMDevice *self,
+@@ -11590,9 +11599,13 @@ check_connection_available (NMDevice *self,
  
  	/* Connections which require a network connection are not available when
  	 * the device has no carrier, even with ignore-carrer=TRUE.

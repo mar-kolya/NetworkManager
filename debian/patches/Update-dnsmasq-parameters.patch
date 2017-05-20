@@ -26,7 +26,7 @@ index 5223638..ca06f04 100644
  	argv[idx++] = "--clear-on-reload"; /* clear cache when dns server changes */
  	argv[idx++] = "--conf-file=/dev/null"; /* avoid loading /etc/dnsmasq.conf */
 diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
-index 1f7eb96..c0969b8 100644
+index cc9be29..a5470aa 100644
 --- a/src/dns/nm-dns-manager.c
 +++ b/src/dns/nm-dns-manager.c
 @@ -1170,14 +1170,14 @@ update_dns (NMDnsManager *self,
