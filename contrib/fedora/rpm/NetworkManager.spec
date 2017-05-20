@@ -15,13 +15,12 @@
 %global ppp_version %(sed -n 's/^#define\\s*VERSION\\s*"\\([^\\s]*\\)"$/\\1/p' %{_includedir}/pppd/patchlevel.h 2>/dev/null | grep . || echo bad)
 %global glib2_version %(pkg-config --modversion glib-2.0 2>/dev/null || echo bad)
 
-%global snapshot %{nil}
-%global git_sha __COMMIT__
-
+%global epoch_version 1
 %global rpm_version __VERSION__
 %global real_version __VERSION__
 %global release_version __RELEASE_VERSION__
-%global epoch_version 1
+%global snapshot %{nil}
+%global git_sha __COMMIT__
 
 %global obsoletes_device_plugins 1:0.9.9.95-1
 %global obsoletes_ppp_plugin     1:1.5.3
@@ -93,7 +92,6 @@ Requires(postun): systemd
 
 Requires: dbus >= %{dbus_version}
 Requires: glib2 >= %{glib2_version}
-Requires: libnl3 >= %{libnl3_version}
 Requires: %{name}-libnm%{?_isa} = %{epoch}:%{version}-%{release}
 Obsoletes: dhcdbd
 Obsoletes: NetworkManager < %{obsoletes_device_plugins}
@@ -406,9 +404,9 @@ intltoolize --automake --copy --force
 	--enable-modify-system=yes \
 	--enable-concheck \
 %if 0%{?fedora}
-	--enable-libpsl \
+	--with-libpsl \
 %else
-	--disable-libpsl \
+	--without-libpsl \
 %endif
 	--with-session-tracking=systemd \
 	--with-suspend-resume=systemd \

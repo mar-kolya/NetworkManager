@@ -755,7 +755,7 @@ _get_fcn_gobject_enum (ARGS_GET_FCN)
 		        && !G_IS_ENUM_CLASS (gtype_class ?: (gtype_class = g_type_class_ref (gtype))))
 		    ? g_strdup_printf ("0x%"G_GINT64_FORMAT, v)
 		    : g_strdup_printf ("%"G_GINT64_FORMAT, v);
-		RETURN_STR_TO_FREE (s);
+		RETURN_STR_TO_FREE (g_steal_pointer (&s));
 	}
 
 	/* the gobject_enum.value_infos are currently ignored for the getter. They
@@ -1035,7 +1035,6 @@ fail:
 				max = property_info->property_typ_data->subtype.gobject_enum.max;
 			}
 		}
-
 		valid_all = nm_utils_enum_get_values (gtype, min, max);
 		valid_str = g_strjoinv (",", (char **) valid_all);
 		g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
@@ -6994,6 +6993,14 @@ static const NMMetaPropertyInfo *const property_infos_WIRELESS_SECURITY[] = {
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_SECURITY_LEAP_PASSWORD_FLAGS,
 		.property_type =                &_pt_gobject_secret_flags,
+	),
+	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_SECURITY_WPS_METHOD,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_wireless_security_wps_method_get_type,
+			),
+		),
 	),
 	NULL
 };

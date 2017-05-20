@@ -261,7 +261,7 @@ typedef struct {
 	gboolean        (*can_unmanaged_external_down)  (NMDevice *self);
 
 	/* Carrier state (IFF_LOWER_UP) */
-	void            (*carrier_changed) (NMDevice *, gboolean carrier);
+	void            (*carrier_changed_notify) (NMDevice *, gboolean carrier);
 
 	gboolean    (* get_ip_iface_identifier) (NMDevice *self, NMUtilsIPv6IfaceId *out_iid);
 
@@ -363,9 +363,6 @@ typedef struct {
 	void            (* release_slave) (NMDevice *self,
 	                                   NMDevice *slave,
 	                                   gboolean configure);
-
-	gboolean        (* have_any_ready_slaves) (NMDevice *self,
-	                                           const GSList *slaves);
 
 	void            (* parent_changed_notify) (NMDevice *self,
 	                                           int old_ifindex,

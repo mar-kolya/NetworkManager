@@ -59,6 +59,7 @@
 #include "nm-netns.h"
 #include "nm-dispatcher.h"
 #include "nm-config.h"
+#include "nm-utils/c-list.h"
 #include "dns/nm-dns-manager.h"
 #include "nm-core-internal.h"
 #include "nm-default-route-manager.h"
@@ -106,6 +107,7 @@ typedef enum {
 } IpState;
 
 typedef struct {
+	CList lst_slave;
 	NMDevice *slave;
 	gulong watch_id;
 	bool slave_is_enslaved;
@@ -450,7 +452,7 @@ typedef struct _NMDevicePrivate {
 
 	/* slave management */
 	bool            is_master;
-	GSList *        slaves;    /* list of SlaveInfo */
+	CList           slaves;    /* list of SlaveInfo */
 
 	NMMetered       metered;
 
@@ -1921,11 +1923,11 @@ static SlaveInfo *
 find_slave_info (NMDevice *self, NMDevice *slave)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+	CList *iter;
 	SlaveInfo *info;
-	GSList *iter;
 
-	for (iter = priv->slaves; iter; iter = g_slist_next (iter)) {
-		info = iter->data;
+	c_list_for_each (iter, &priv->slaves) {
+		info = c_list_entry (iter, SlaveInfo, lst_slave);
 		if (info->slave == slave)
 			return info;
 	}
@@ -2045,7 +2047,7 @@ nm_device_master_release_one_slave (NMDevice *self, NMDevice *slave, gboolean co
 	 * Transfers ownership from slave_priv->master.  */
 	self_free = self;
 
-	priv->slaves = g_slist_remove (priv->slaves, info);
+	c_list_unlink_init (&info->lst_slave);
 	slave_priv->master = NULL;
 
 	g_signal_handler_disconnect (slave, info->watch_id);
@@ -2085,7 +2087,8 @@ is_unmanaged_external_down (NMDevice *self, gboolean consider_can)
 	/* Manage externally-created software interfaces only when they are IFF_UP */
 	if (   priv->ifindex <= 0
 	    || !priv->up
-	    || !(priv->slaves || nm_platform_link_can_assume (nm_device_get_platform (self), priv->ifindex)))
+	    || !(   !c_list_is_empty (&priv->slaves)
+	         || nm_platform_link_can_assume (nm_device_get_platform (self), priv->ifindex)))
 		return NM_UNMAN_FLAG_OP_SET_UNMANAGED;
 
 	return NM_UNMAN_FLAG_OP_SET_MANAGED;
@@ -2167,10 +2170,20 @@ nm_device_update_dynamic_ip_setup (NMDevice *self)
 	}
 }
 
+/*****************************************************************************/
+
+static void
+carrier_changed_notify (NMDevice *self, gboolean carrier)
+{
+	/* stub */
+}
+
 static void
 carrier_changed (NMDevice *self, gboolean carrier)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
+	NM_DEVICE_GET_CLASS (self)->carrier_changed_notify (self, carrier);
 
 	if (priv->state <= NM_DEVICE_STATE_UNMANAGED)
 		return;
@@ -2195,7 +2208,7 @@ carrier_changed (NMDevice *self, gboolean carrier)
 			nm_device_activate_stage3_ip6_start (self);
 
 		return;
-	} else if (nm_device_get_enslaved (self) && !carrier) {
+	} else if (priv->is_enslaved && !carrier) {
 		/* Slaves don't deactivate when they lose carrier; for
 		 * bonds/teams in particular that would be actively
 		 * counterproductive.
@@ -2236,7 +2249,7 @@ carrier_changed (NMDevice *self, gboolean carrier)
 #define LINK_DISCONNECT_DELAY 4
 
 static gboolean
-link_disconnect_action_cb (gpointer user_data)
+carrier_disconnected_action_cb (gpointer user_data)
 {
 	NMDevice *self = NM_DEVICE (user_data);
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
@@ -2244,21 +2257,19 @@ link_disconnect_action_cb (gpointer user_data)
 	_LOGD (LOGD_DEVICE, "link disconnected (calling deferred action) (id=%u)", priv->carrier_defer_id);
 
 	priv->carrier_defer_id = 0;
-
-	NM_DEVICE_GET_CLASS (self)->carrier_changed (self, FALSE);
-
+	carrier_changed (self, FALSE);
 	return FALSE;
 }
 
 static void
-link_disconnect_action_cancel (NMDevice *self)
+carrier_disconnected_action_cancel (NMDevice *self)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+	guint id = priv->carrier_defer_id;
 
-	if (priv->carrier_defer_id) {
-		g_source_remove (priv->carrier_defer_id);
-		_LOGD (LOGD_DEVICE, "link disconnected (canceling deferred action) (id=%u)", priv->carrier_defer_id);
-		priv->carrier_defer_id = 0;
+	if (nm_clear_g_source (&priv->carrier_defer_id)) {
+		_LOGD (LOGD_DEVICE, "link disconnected (canceling deferred action) (id=%u)",
+		       id);
 	}
 }
 
@@ -2266,7 +2277,6 @@ void
 nm_device_set_carrier (NMDevice *self, gboolean carrier)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	NMDeviceClass *klass = NM_DEVICE_GET_CLASS (self);
 	NMDeviceState state = nm_device_get_state (self);
 
 	if (priv->carrier == carrier)
@@ -2277,24 +2287,50 @@ nm_device_set_carrier (NMDevice *self, gboolean carrier)
 
 	if (priv->carrier) {
 		_LOGI (LOGD_DEVICE, "link connected");
-		link_disconnect_action_cancel (self);
-		klass->carrier_changed (self, TRUE);
+		carrier_disconnected_action_cancel (self);
+		carrier_changed (self, TRUE);
 
-		if (nm_clear_g_source (&priv->carrier_wait_id)) {
-			nm_device_remove_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, TRUE);
+		if (priv->carrier_wait_id) {
+			nm_device_remove_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, FALSE);
 			_carrier_wait_check_queued_act_request (self);
 		}
-	} else if (   state <= NM_DEVICE_STATE_DISCONNECTED
-	           && !priv->queued_act_request) {
-		_LOGD (LOGD_DEVICE, "link disconnected");
-		klass->carrier_changed (self, FALSE);
 	} else {
-		priv->carrier_defer_id = g_timeout_add_seconds (LINK_DISCONNECT_DELAY,
-		                                                link_disconnect_action_cb, self);
-		_LOGD (LOGD_DEVICE, "link disconnected (deferring action for %d seconds) (id=%u)",
-		       LINK_DISCONNECT_DELAY, priv->carrier_defer_id);
+		if (priv->carrier_wait_id)
+			nm_device_add_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, FALSE);
+		if (   state <= NM_DEVICE_STATE_DISCONNECTED
+		    && !priv->queued_act_request) {
+			_LOGD (LOGD_DEVICE, "link disconnected");
+			carrier_changed (self, FALSE);
+		} else {
+			priv->carrier_defer_id = g_timeout_add_seconds (LINK_DISCONNECT_DELAY,
+			                                                carrier_disconnected_action_cb, self);
+			_LOGD (LOGD_DEVICE, "link disconnected (deferring action for %d seconds) (id=%u)",
+			       LINK_DISCONNECT_DELAY, priv->carrier_defer_id);
+		}
 	}
 }
+
+static void
+nm_device_set_carrier_from_platform (NMDevice *self)
+{
+	if (nm_device_has_capability (self, NM_DEVICE_CAP_CARRIER_DETECT)) {
+		if (!nm_device_has_capability (self, NM_DEVICE_CAP_NONSTANDARD_CARRIER)) {
+			nm_device_set_carrier (self,
+			                       nm_platform_link_is_connected (nm_device_get_platform (self),
+			                                                      nm_device_get_ip_ifindex (self)));
+		}
+	} else {
+		NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
+		/* Fake online link when carrier detection is not available. */
+		if (!priv->carrier) {
+			priv->carrier = TRUE;
+			_notify (self, PROP_CARRIER);
+		}
+	}
+}
+
+/*****************************************************************************/
 
 static void
 device_recheck_slave_status (NMDevice *self, const NMPlatformLink *plink)
@@ -2427,7 +2463,7 @@ device_link_changed (NMDevice *self)
 	info = *pllink;
 
 	udi = nm_platform_link_get_udi (nm_device_get_platform (self), info.ifindex);
-	if (udi && g_strcmp0 (udi, priv->udi)) {
+	if (udi && !nm_streq0 (udi, priv->udi)) {
 		/* Update UDI to what udev gives us */
 		g_free (priv->udi);
 		priv->udi = g_strdup (udi);
@@ -2808,7 +2844,7 @@ update_device_from_platform_link (NMDevice *self, const NMPlatformLink *plink)
 	g_return_if_fail (plink != NULL);
 
 	udi = nm_platform_link_get_udi (nm_device_get_platform (self), plink->ifindex);
-	if (udi && !g_strcmp0 (udi, priv->udi)) {
+	if (udi && !nm_streq0 (udi, priv->udi)) {
 		g_free (priv->udi);
 		priv->udi = g_strdup (udi);
 		_notify (self, PROP_UDI);
@@ -2869,15 +2905,6 @@ config_changed (NMConfig *config,
 
 	if (NM_FLAGS_HAS (changes, NM_CONFIG_CHANGE_VALUES))
 		device_init_sriov_num_vfs (self);
-}
-
-static void
-check_carrier (NMDevice *self)
-{
-	int ifindex = nm_device_get_ip_ifindex (self);
-
-	if (!nm_device_has_capability (self, NM_DEVICE_CAP_NONSTANDARD_CARRIER))
-		nm_device_set_carrier (self, nm_platform_link_is_connected (nm_device_get_platform (self), ifindex));
 }
 
 static void
@@ -3010,16 +3037,7 @@ realize_start_setup (NMDevice *self,
 		                                            self);
 	}
 
-	if (nm_device_has_capability (self, NM_DEVICE_CAP_CARRIER_DETECT)) {
-		check_carrier (self);
-		_LOGD (LOGD_PLATFORM,
-		       "carrier is %s%s",
-		       priv->carrier ? "ON" : "OFF",
-		       priv->ignore_carrier ? " (but ignored)" : "");
-	} else {
-		/* Fake online link when carrier detection is not available. */
-		priv->carrier = TRUE;
-	}
+	nm_device_set_carrier_from_platform (self);
 
 	device_init_sriov_num_vfs (self);
 
@@ -3349,7 +3367,8 @@ slave_state_changed (NMDevice *slave,
 		                                    priv->sys_iface_state == NM_DEVICE_SYS_IFACE_STATE_MANAGED,
 		                                    reason);
 		/* Bridge/bond/team interfaces are left up until manually deactivated */
-		if (priv->slaves == NULL && priv->state == NM_DEVICE_STATE_ACTIVATED)
+		if (   c_list_is_empty (&priv->slaves)
+		    && priv->state == NM_DEVICE_STATE_ACTIVATED)
 			_LOGD (LOGD_DEVICE, "last slave removed; remaining activated");
 	}
 }
@@ -3400,7 +3419,7 @@ nm_device_master_add_slave (NMDevice *self, NMDevice *slave, gboolean configure)
 		info->watch_id = g_signal_connect (slave,
 		                                   NM_DEVICE_STATE_CHANGED,
 		                                   G_CALLBACK (slave_state_changed), self);
-		priv->slaves = g_slist_append (priv->slaves, info);
+		c_list_link_tail (&priv->slaves, &info->lst_slave);
 		slave_priv->master = g_object_ref (self);
 
 		/* no need to emit
@@ -3423,46 +3442,6 @@ nm_device_master_add_slave (NMDevice *self, NMDevice *slave, gboolean configure)
 }
 
 /**
- * nm_device_master_get_slaves:
- * @self: the master device
- *
- * Returns: any slaves of which @self is the master.  Caller owns returned list.
- */
-static GSList *
-nm_device_master_get_slaves (NMDevice *self)
-{
-	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	GSList *slaves = NULL, *iter;
-
-	for (iter = priv->slaves; iter; iter = g_slist_next (iter))
-		slaves = g_slist_prepend (slaves, ((SlaveInfo *) iter->data)->slave);
-
-	return slaves;
-}
-
-/**
- * nm_device_master_get_slave_by_ifindex:
- * @self: the master device
- * @ifindex: the slave's interface index
- *
- * Returns: the slave with the given @ifindex of which @self is the master,
- *   or %NULL if no device with @ifindex is a slave of @self.
- */
-NMDevice *
-nm_device_master_get_slave_by_ifindex (NMDevice *self, int ifindex)
-{
-	GSList *iter;
-
-	for (iter = NM_DEVICE_GET_PRIVATE (self)->slaves; iter; iter = g_slist_next (iter)) {
-		SlaveInfo *info = iter->data;
-
-		if (nm_device_get_ip_ifindex (info->slave) == ifindex)
-			return info->slave;
-	}
-	return NULL;
-}
-
-/**
  * nm_device_master_check_slave_physical_port:
  * @self: the master device
  * @slave: a slave device
@@ -3478,14 +3457,14 @@ nm_device_master_check_slave_physical_port (NMDevice *self, NMDevice *slave,
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	const char *slave_physical_port_id, *existing_physical_port_id;
 	SlaveInfo *info;
-	GSList *iter;
+	CList *iter;
 
 	slave_physical_port_id = nm_device_get_physical_port_id (slave);
 	if (!slave_physical_port_id)
 		return;
 
-	for (iter = priv->slaves; iter; iter = iter->next) {
-		info = iter->data;
+	c_list_for_each (iter, &priv->slaves) {
+		info = c_list_entry (iter, SlaveInfo, lst_slave);
 		if (info->slave == slave)
 			continue;
 
@@ -3511,6 +3490,7 @@ nm_device_master_release_slaves (NMDevice *self)
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	NMDeviceStateReason reason;
 	gboolean configure = TRUE;
+	CList *iter, *safe;
 
 	/* Don't release the slaves if this connection doesn't belong to NM. */
 	if (nm_device_sys_iface_state_is_external (self))
@@ -3523,8 +3503,8 @@ nm_device_master_release_slaves (NMDevice *self)
 	if (!nm_platform_link_get (nm_device_get_platform (self), priv->ifindex))
 		configure = FALSE;
 
-	while (priv->slaves) {
-		SlaveInfo *info = priv->slaves->data;
+	c_list_for_each_safe (iter, safe, &priv->slaves) {
+		SlaveInfo *info = c_list_entry (iter, SlaveInfo, lst_slave);
 
 		nm_device_master_release_one_slave (self, info->slave, configure, reason);
 	}
@@ -3667,19 +3647,6 @@ nm_device_slave_notify_release (NMDevice *self, NMDeviceStateReason reason)
 		_notify (self, PROP_MASTER);
 		_notify (priv->master, PROP_SLAVES);
 	}
-}
-
-/**
- * nm_device_get_enslaved:
- * @self: the #NMDevice
- *
- * Returns: %TRUE if the device is enslaved to a master device (eg bridge or
- * bond or team), %FALSE if not
- */
-gboolean
-nm_device_get_enslaved (NMDevice *self)
-{
-	return NM_DEVICE_GET_PRIVATE (self)->is_enslaved;
 }
 
 /**
@@ -3960,7 +3927,8 @@ device_has_config (NMDevice *self)
 		return TRUE;
 
 	/* Master-slave relationship is also a configuration */
-	if (priv->slaves || nm_platform_link_get_master (nm_device_get_platform (self), priv->ifindex) > 0)
+	if (   !c_list_is_empty (&priv->slaves)
+	    || nm_platform_link_get_master (nm_device_get_platform (self), priv->ifindex) > 0)
 		return TRUE;
 
 	return FALSE;
@@ -4101,7 +4069,7 @@ nm_device_generate_connection (NMDevice *self, NMDevice *master)
 	if (   g_strcmp0 (ip4_method, NM_SETTING_IP4_CONFIG_METHOD_DISABLED) == 0
 	    && g_strcmp0 (ip6_method, NM_SETTING_IP6_CONFIG_METHOD_IGNORE) == 0
 	    && !nm_setting_connection_get_master (NM_SETTING_CONNECTION (s_con))
-	    && !priv->slaves) {
+	    && c_list_is_empty (&priv->slaves)) {
 		_LOGD (LOGD_DEVICE, "ignoring generated connection (no IP and not in master-slave relationship)");
 		g_object_unref (connection);
 		connection = NULL;
@@ -4114,7 +4082,7 @@ nm_device_generate_connection (NMDevice *self, NMDevice *master)
 	    && g_strcmp0 (ip4_method, NM_SETTING_IP4_CONFIG_METHOD_DISABLED) == 0
 	    && g_strcmp0 (ip6_method, NM_SETTING_IP6_CONFIG_METHOD_LINK_LOCAL) == 0
 	    && !nm_setting_connection_get_master (NM_SETTING_CONNECTION (s_con))
-	    && !priv->slaves
+	    && c_list_is_empty (&priv->slaves)
 	    && !nm_config_data_get_assume_ipv6ll_only (NM_CONFIG_GET_DATA, self)) {
 		_LOGD (LOGD_DEVICE, "ignoring generated connection (IPv6LL-only and not in master-slave relationship)");
 		g_object_unref (connection);
@@ -4730,7 +4698,7 @@ activate_stage2_device_config (NMDevice *self)
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	NMActStageReturn ret;
 	gboolean no_firmware = FALSE;
-	GSList *iter;
+	CList *iter;
 
 	nm_device_state_changed (self, NM_DEVICE_STATE_CONFIG, NM_DEVICE_STATE_REASON_NONE);
 
@@ -4757,8 +4725,8 @@ activate_stage2_device_config (NMDevice *self)
 	}
 
 	/* If we have slaves that aren't yet enslaved, do that now */
-	for (iter = priv->slaves; iter; iter = g_slist_next (iter)) {
-		SlaveInfo *info = iter->data;
+	c_list_for_each (iter, &priv->slaves) {
+		SlaveInfo *info = c_list_entry (iter, SlaveInfo, lst_slave);
 		NMDeviceState slave_state = nm_device_get_state (info->slave);
 
 		if (slave_state == NM_DEVICE_STATE_IP_CONFIG)
@@ -5472,8 +5440,15 @@ ip4_config_merge_and_apply (NMDevice *self,
 	composite = nm_ip4_config_new (nm_device_get_ip_ifindex (self));
 	init_ip4_config_dns_priority (self, composite);
 
-	if (commit)
+	if (commit) {
 		ensure_con_ip4_config (self);
+		if (priv->queued_ip4_config_id) {
+			g_clear_object (&priv->ext_ip4_config);
+			priv->ext_ip4_config = nm_ip4_config_capture (nm_device_get_platform (self),
+			                                              nm_device_get_ifindex (self),
+			                                              FALSE);
+		}
+	}
 
 	if (priv->dev_ip4_config) {
 		nm_ip4_config_merge (composite, priv->dev_ip4_config,
@@ -6015,16 +5990,19 @@ connection_requires_carrier (NMConnection *connection)
 }
 
 static gboolean
-have_any_ready_slaves (NMDevice *self, const GSList *slaves)
+have_any_ready_slaves (NMDevice *self)
 {
-	const GSList *iter;
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+	SlaveInfo *info;
+	CList *iter;
 
 	/* Any enslaved slave is "ready" in the generic case as it's
 	 * at least >= NM_DEVCIE_STATE_IP_CONFIG and has had Layer 2
 	 * properties set up.
 	 */
-	for (iter = slaves; iter; iter = g_slist_next (iter)) {
-		if (nm_device_get_enslaved (iter->data))
+	c_list_for_each (iter, &priv->slaves) {
+		info = c_list_entry (iter, SlaveInfo, lst_slave);
+		if (NM_DEVICE_GET_PRIVATE (info->slave)->is_enslaved)
 			return TRUE;
 	}
 	return FALSE;
@@ -6048,8 +6026,6 @@ act_stage3_ip4_config_start (NMDevice *self,
 	NMConnection *connection;
 	NMActStageReturn ret = NM_ACT_STAGE_RETURN_FAILURE;
 	const char *method;
-	GSList *slaves;
-	gboolean ready_slaves;
 
 	connection = nm_device_get_applied_connection (self);
 	g_return_val_if_fail (connection, NM_ACT_STAGE_RETURN_FAILURE);
@@ -6066,11 +6042,7 @@ act_stage3_ip4_config_start (NMDevice *self,
 		/* If the master has no ready slaves, and depends on slaves for
 		 * a successful IPv4 attempt, then postpone IPv4 addressing.
 		 */
-		slaves = nm_device_master_get_slaves (self);
-		ready_slaves = NM_DEVICE_GET_CLASS (self)->have_any_ready_slaves (self, slaves);
-		g_slist_free (slaves);
-
-		if (ready_slaves == FALSE) {
+		if (!have_any_ready_slaves (self)) {
 			_LOGI (LOGD_DEVICE | LOGD_IP4,
 			       "IPv4 config waiting until slaves are ready");
 			return NM_ACT_STAGE_RETURN_IP_WAIT;
@@ -6208,8 +6180,19 @@ ip6_config_merge_and_apply (NMDevice *self,
 	                           NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN);
 	init_ip6_config_dns_priority (self, composite);
 
-	if (commit)
+	if (commit) {
 		ensure_con_ip6_config (self);
+		if (priv->queued_ip6_config_id) {
+			g_clear_object (&priv->ext_ip6_config);
+			g_clear_object (&priv->ext_ip6_config_captured);
+			priv->ext_ip6_config_captured = nm_ip6_config_capture (nm_device_get_platform (self),
+			                                                       nm_device_get_ifindex (self),
+			                                                       FALSE,
+			                                                       NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN);
+			if (priv->ext_ip6_config_captured)
+				priv->ext_ip6_config = nm_ip6_config_new_cloned (priv->ext_ip6_config_captured);
+		}
+	}
 
 	/* Merge all the IP configs into the composite config */
 	if (priv->ac_ip6_config) {
@@ -7652,8 +7635,6 @@ act_stage3_ip6_config_start (NMDevice *self,
 	const char *method;
 	NMSettingIP6ConfigPrivacy ip6_privacy = NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN;
 	const char *ip6_privacy_str = "0";
-	GSList *slaves;
-	gboolean ready_slaves;
 
 	connection = nm_device_get_applied_connection (self);
 	g_return_val_if_fail (connection, NM_ACT_STAGE_RETURN_FAILURE);
@@ -7670,11 +7651,7 @@ act_stage3_ip6_config_start (NMDevice *self,
 		/* If the master has no ready slaves, and depends on slaves for
 		 * a successful IPv6 attempt, then postpone IPv6 addressing.
 		 */
-		slaves = nm_device_master_get_slaves (self);
-		ready_slaves = NM_DEVICE_GET_CLASS (self)->have_any_ready_slaves (self, slaves);
-		g_slist_free (slaves);
-
-		if (ready_slaves == FALSE) {
+		if (!have_any_ready_slaves (self)) {
 			_LOGI (LOGD_DEVICE | LOGD_IP6,
 			       "IPv6 config waiting until slaves are ready");
 			return NM_ACT_STAGE_RETURN_IP_WAIT;
@@ -10286,12 +10263,12 @@ static gboolean
 carrier_wait_timeout (gpointer user_data)
 {
 	NMDevice *self = NM_DEVICE (user_data);
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
-	NM_DEVICE_GET_PRIVATE (self)->carrier_wait_id = 0;
-	nm_device_remove_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, TRUE);
-
-	_carrier_wait_check_queued_act_request (self);
-
+	priv->carrier_wait_id = 0;
+	nm_device_remove_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, FALSE);
+	if (!priv->carrier)
+		_carrier_wait_check_queued_act_request (self);
 	return G_SOURCE_REMOVE;
 }
 
@@ -10333,8 +10310,7 @@ nm_device_bring_up (NMDevice *self, gboolean block, gboolean *no_firmware)
 	}
 
 	/* Store carrier immediately. */
-	if (nm_device_has_capability (self, NM_DEVICE_CAP_CARRIER_DETECT))
-		check_carrier (self);
+	nm_device_set_carrier_from_platform (self);
 
 	device_is_up = nm_device_is_up (self);
 	if (block && !device_is_up) {
@@ -10369,8 +10345,14 @@ nm_device_bring_up (NMDevice *self, gboolean block, gboolean *no_firmware)
 	 * a timeout is reached.
 	 */
 	if (nm_device_has_capability (self, NM_DEVICE_CAP_CARRIER_DETECT)) {
-		if (!nm_clear_g_source (&priv->carrier_wait_id))
-			nm_device_add_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, TRUE);
+		/* we start a grace period of 5 seconds during which we will schedule
+		 * a pending action whenever we have no carrier.
+		 *
+		 * If during that time carrier goes away, we declare the interface
+		 * as not ready. */
+		nm_clear_g_source (&priv->carrier_wait_id);
+		if (!priv->carrier)
+			nm_device_add_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, FALSE);
 		priv->carrier_wait_id = g_timeout_add_seconds (5, carrier_wait_timeout, self);
 	}
 
@@ -11812,7 +11794,7 @@ nm_device_add_pending_action (NMDevice *self, const char *action, gboolean asser
 				       count + g_slist_length (iter), action);
 				g_return_val_if_reached (FALSE);
 			} else {
-				_LOGD (LOGD_DEVICE, "add_pending_action (%d): '%s' already pending (expected)",
+				_LOGT (LOGD_DEVICE, "add_pending_action (%d): '%s' already pending (expected)",
 				       count + g_slist_length (iter), action);
 			}
 			return FALSE;
@@ -11873,7 +11855,7 @@ nm_device_remove_pending_action (NMDevice *self, const char *action, gboolean as
 		_LOGW (LOGD_DEVICE, "remove_pending_action (%d): '%s' not pending", count, action);
 		g_return_val_if_reached (FALSE);
 	} else
-		_LOGD (LOGD_DEVICE, "remove_pending_action (%d): '%s' not pending (expected)", count, action);
+		_LOGT (LOGD_DEVICE, "remove_pending_action (%d): '%s' not pending (expected)", count, action);
 
 	return FALSE;
 }
@@ -12609,15 +12591,11 @@ _set_state_full (NMDevice *self,
 		if (   priv->queued_act_request
 		    && !priv->queued_act_request_is_waiting_for_carrier) {
 			NMActRequest *queued_req;
-			gboolean success;
 
 			queued_req = priv->queued_act_request;
 			priv->queued_act_request = NULL;
-			success = _device_activate (self, queued_req);
+			_device_activate (self, queued_req);
 			g_object_unref (queued_req);
-			if (success)
-				break;
-			/* fall through */
 		}
 		break;
 	case NM_DEVICE_STATE_ACTIVATED:
@@ -13606,6 +13584,8 @@ nm_device_init (NMDevice *self)
 
 	self->_priv = priv;
 
+	c_list_init (&priv->slaves);
+
 	priv->netns = g_object_ref (NM_NETNS_GET);
 
 	priv->type = NM_DEVICE_TYPE_UNKNOWN;
@@ -13750,7 +13730,7 @@ dispose (GObject *object)
 
 	_cleanup_generic_pre (self, CLEANUP_TYPE_KEEP);
 
-	g_warn_if_fail (priv->slaves == NULL);
+	g_warn_if_fail (c_list_is_empty (&priv->slaves));
 	g_assert (priv->master_ready_id == 0);
 
 	/* Let the kernel manage IPv6LL again */
@@ -13767,7 +13747,7 @@ dispose (GObject *object)
 
 	nm_clear_g_source (&priv->stats.timeout_id);
 
-	link_disconnect_action_cancel (self);
+	carrier_disconnected_action_cancel (self);
 
 	if (priv->ifindex > 0) {
 		priv->ifindex = 0;
@@ -13782,7 +13762,8 @@ dispose (GObject *object)
 
 	available_connections_del_all (self);
 
-	nm_clear_g_source (&priv->carrier_wait_id);
+	if (nm_clear_g_source (&priv->carrier_wait_id))
+		nm_device_remove_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, FALSE);
 
 	_clear_queued_act_request (priv);
 
@@ -13854,14 +13835,11 @@ set_property (GObject *object, guint prop_id,
 
 	switch (prop_id) {
 	case PROP_UDI:
-		if (g_value_get_string (value)) {
-			g_free (priv->udi);
-			priv->udi = g_value_dup_string (value);
-		}
+		/* construct-only */
+		priv->udi = g_value_dup_string (value);
 		break;
 	case PROP_IFACE:
 		/* construct-only */
-		g_return_if_fail (!priv->iface);
 		priv->iface = g_value_dup_string (value);
 		break;
 	case PROP_DRIVER:
@@ -13956,28 +13934,43 @@ get_property (GObject *object, guint prop_id,
 
 	switch (prop_id) {
 	case PROP_UDI:
-		g_value_set_string (value, priv->udi);
+		/* UDI is (depending on the device type) a path to sysfs and can contain
+		 * non-UTF-8.
+		 *   ip link add name $'d\xccf\\c' type dummy  */
+		g_value_take_string (value,
+		                     nm_utils_str_utf8safe_escape_cp (priv->udi,
+		                                                      NM_UTILS_STR_UTF8_SAFE_FLAG_NONE));
 		break;
 	case PROP_IFACE:
-		g_value_set_string (value, priv->iface);
+		g_value_take_string (value,
+		                     nm_utils_str_utf8safe_escape_cp (priv->iface,
+		                                                      NM_UTILS_STR_UTF8_SAFE_FLAG_ESCAPE_CTRL));
 		break;
 	case PROP_IP_IFACE:
-		if (ip_config_valid (priv->state))
-			g_value_set_string (value, nm_device_get_ip_iface (self));
-		else
+		if (ip_config_valid (priv->state)) {
+			g_value_take_string (value,
+			                     nm_utils_str_utf8safe_escape_cp (nm_device_get_ip_iface (self),
+			                                                      NM_UTILS_STR_UTF8_SAFE_FLAG_ESCAPE_CTRL));
+		} else
 			g_value_set_string (value, NULL);
 		break;
 	case PROP_IFINDEX:
 		g_value_set_int (value, priv->ifindex);
 		break;
 	case PROP_DRIVER:
-		g_value_set_string (value, priv->driver);
+		g_value_take_string (value,
+		                     nm_utils_str_utf8safe_escape_cp (priv->driver,
+		                                                      NM_UTILS_STR_UTF8_SAFE_FLAG_ESCAPE_CTRL));
 		break;
 	case PROP_DRIVER_VERSION:
-		g_value_set_string (value, priv->driver_version);
+		g_value_take_string (value,
+		                     nm_utils_str_utf8safe_escape_cp (priv->driver_version,
+		                                                      NM_UTILS_STR_UTF8_SAFE_FLAG_ESCAPE_CTRL));
 		break;
 	case PROP_FIRMWARE_VERSION:
-		g_value_set_string (value, priv->firmware_version);
+		g_value_take_string (value,
+		                     nm_utils_str_utf8safe_escape_cp (priv->firmware_version,
+		                                                      NM_UTILS_STR_UTF8_SAFE_FLAG_ESCAPE_CTRL));
 		break;
 	case PROP_CAPABILITIES:
 		g_value_set_uint (value, (priv->capabilities & ~NM_DEVICE_CAP_INTERNAL_MASK));
@@ -14088,13 +14081,15 @@ get_property (GObject *object, guint prop_id,
 		g_value_set_boolean (value, nm_device_is_real (self));
 		break;
 	case PROP_SLAVES: {
-		GSList *slave_iter;
+		CList *slave_iter;
 		char **slave_list;
-		guint i;
+		gsize i, n;
 
-		slave_list = g_new (char *, g_slist_length (priv->slaves) + 1);
-		for (slave_iter = priv->slaves, i = 0; slave_iter; slave_iter = slave_iter->next) {
-			SlaveInfo *info = slave_iter->data;
+		n = c_list_length (&priv->slaves);
+		slave_list = g_new (char *, n + 1);
+		i = 0;
+		c_list_for_each (slave_iter, &priv->slaves) {
+			SlaveInfo *info = c_list_entry (slave_iter, SlaveInfo, lst_slave);
 			const char *path;
 
 			if (!NM_DEVICE_GET_PRIVATE (info->slave)->is_enslaved)
@@ -14103,6 +14098,7 @@ get_property (GObject *object, guint prop_id,
 			if (path)
 				slave_list[i++] = g_strdup (path);
 		}
+		nm_assert (i <= n);
 		slave_list[i] = NULL;
 		g_value_take_boxed (value, slave_list);
 		break;
@@ -14151,7 +14147,6 @@ nm_device_class_init (NMDeviceClass *klass)
 	klass->act_stage3_ip6_config_start = act_stage3_ip6_config_start;
 	klass->act_stage4_ip4_config_timeout = act_stage4_ip4_config_timeout;
 	klass->act_stage4_ip6_config_timeout = act_stage4_ip6_config_timeout;
-	klass->have_any_ready_slaves = have_any_ready_slaves;
 
 	klass->get_type_description = get_type_description;
 	klass->get_autoconnect_allowed = get_autoconnect_allowed;
@@ -14161,7 +14156,7 @@ nm_device_class_init (NMDeviceClass *klass)
 	klass->can_unmanaged_external_down = can_unmanaged_external_down;
 	klass->realize_start_notify = realize_start_notify;
 	klass->unrealize_notify = unrealize_notify;
-	klass->carrier_changed = carrier_changed;
+	klass->carrier_changed_notify = carrier_changed_notify;
 	klass->get_ip_iface_identifier = get_ip_iface_identifier;
 	klass->unmanaged_on_quit = unmanaged_on_quit;
 	klass->deactivate_reset_hw_addr = deactivate_reset_hw_addr;
@@ -14172,7 +14167,7 @@ nm_device_class_init (NMDeviceClass *klass)
 	obj_properties[PROP_UDI] =
 	    g_param_spec_string (NM_DEVICE_UDI, "", "",
 	                         NULL,
-	                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT |
+	                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
 	                         G_PARAM_STATIC_STRINGS);
 	obj_properties[PROP_IFACE] =
 	    g_param_spec_string (NM_DEVICE_IFACE, "", "",
