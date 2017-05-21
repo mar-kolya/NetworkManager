@@ -10,3 +10,4 @@ libnm-Check-self-still-NMManager-or-not.patch
 dns-manager-don-t-merge-split-DNS-search-domains.patch
 systemd-Don-t-enable-NetworkManager-wait-online.service-s.patch
 Handle-carrier-changes-by-bond-devices.patch
+Bond-add-support-for-cloned-mac.patch

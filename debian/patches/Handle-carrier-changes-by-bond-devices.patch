@@ -60,7 +60,7 @@ index 3325c94..d2b7b2f 100644
  
  	parent_class->update_connection = update_connection;
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index 97cb7f2..0743593 100644
+index ed6aa0e..70a49a3 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -2195,24 +2195,33 @@ carrier_changed (NMDevice *self, gboolean carrier)
