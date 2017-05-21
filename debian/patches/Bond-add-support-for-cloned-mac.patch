@@ -3,15 +3,23 @@ Date: Sun, 21 May 2017 17:07:17 -0400
 Subject: Bond: add support for cloned mac
 
 ---
- clients/tui/nmt-page-bond.c  | 6 ++++++
+ clients/tui/nmt-page-bond.c  | 7 +++++++
  libnm-core/nm-setting-bond.c | 4 ++++
- 2 files changed, 10 insertions(+)
+ 2 files changed, 11 insertions(+)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
-index 48070db..732a145 100644
+index 48070db..a54ef17 100644
 --- a/clients/tui/nmt-page-bond.c
 +++ b/clients/tui/nmt-page-bond.c
-@@ -361,6 +361,12 @@ nmt_page_bond_constructed (GObject *object)
+@@ -29,6 +29,7 @@
+ 
+ #include "nmt-page-bond.h"
+ 
++#include "nmt-mac-entry.h"
+ #include "nmt-address-list.h"
+ #include "nmt-slave-list.h"
+ 
+@@ -361,6 +362,12 @@ nmt_page_bond_constructed (GObject *object)
  	nmt_editor_grid_append (grid, NULL, widget, NULL);
  	priv->slaves = NMT_SLAVE_LIST (widget);
  
