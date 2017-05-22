@@ -3,9 +3,10 @@ Date: Sun, 21 May 2017 17:07:17 -0400
 Subject: Bond: add support for cloned mac
 
 ---
- clients/tui/nmt-page-bond.c  | 7 +++++++
- libnm-core/nm-setting-bond.c | 4 ++++
- 2 files changed, 11 insertions(+)
+ clients/tui/nmt-page-bond.c  |   7 ++
+ libnm-core/nm-setting-bond.c | 188 ++++++++++++++++++++++++++++++++++++++++++-
+ libnm-core/nm-setting-bond.h |   2 +
+ 3 files changed, 196 insertions(+), 1 deletion(-)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..a54ef17 100644
@@ -33,7 +34,7 @@ index 48070db..a54ef17 100644
  	g_signal_connect (widget, "notify::active-id",
  	                  G_CALLBACK (mode_widget_changed), bond);
 diff --git a/libnm-core/nm-setting-bond.c b/libnm-core/nm-setting-bond.c
-index 9a8bdc3..dd94dc0 100644
+index 9a8bdc3..056b422 100644
 --- a/libnm-core/nm-setting-bond.c
 +++ b/libnm-core/nm-setting-bond.c
 @@ -49,11 +49,15 @@ NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_BOND)
@@ -52,3 +53,249 @@ index 9a8bdc3..dd94dc0 100644
  	PROP_OPTIONS,
  	LAST_PROP
  };
+@@ -530,6 +534,38 @@ _nm_setting_bond_option_supported (const char *option, NMBondMode mode)
+ 	return TRUE;
+ }
+ 
++/**
++ * nm_setting_bond_get_cloned_mac_address:
++ * @setting: the #NMSettingBond
++ *
++ * Returns: the #NMSettingBond:cloned-mac-address property of the setting
++ *
++ * Since: 1.9
++ **/
++const char *
++nm_setting_bond_get_cloned_mac_address (NMSettingWired *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), NULL);
++
++	return NM_SETTING_BOND_GET_PRIVATE (setting)->cloned_mac_address;
++}
++
++/**
++ * nm_setting_bond_get_generate_mac_address_mask:
++ * @setting: the #NMSettingBond
++ *
++ * Returns: the #NMSettingBond:generate-mac-address-mask property of the setting
++ *
++ * Since: 1.9
++ **/
++const char *
++nm_setting_bond_get_generate_mac_address_mask (NMSettingWired *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), NULL);
++
++	return NM_SETTING_BOND_GET_PRIVATE (setting)->generate_mac_address_mask;
++}
++
+ static gboolean
+ verify (NMSetting *setting, NMConnection *connection, GError **error)
+ {
+@@ -764,6 +800,31 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
+ 	if (!_nm_connection_verify_required_interface_name (connection, error))
+ 		return FALSE;
+ 
++	if (   priv->cloned_mac_address
++	    && !NM_CLONED_MAC_IS_SPECIAL (priv->cloned_mac_address)
++	    && !nm_utils_hwaddr_valid (priv->cloned_mac_address, ETH_ALEN)) {
++		g_set_error_literal (error,
++		                     NM_CONNECTION_ERROR,
++		                     NM_CONNECTION_ERROR_INVALID_PROPERTY,
++		                     _("is not a valid MAC address"));
++		g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_CLONED_MAC_ADDRESS);
++		return FALSE;
++	}
++
++	/* generate-mac-address-mask only makes sense with cloned-mac-address "random" or
++	 * "stable". Still, let's not be so strict about that and accept the value
++	 * even if it is unused. */
++	if (!_nm_utils_generate_mac_address_mask_parse (priv->generate_mac_address_mask,
++	                                                NULL, NULL, NULL, &local)) {
++		g_set_error_literal (error,
++		                     NM_CONNECTION_ERROR,
++		                     NM_CONNECTION_ERROR_INVALID_PROPERTY,
++		                     local->message);
++		g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_GENERATE_MAC_ADDRESS_MASK);
++		g_error_free (local);
++		return FALSE;
++	}
++	
+ 	/* *** errors above here should be always fatal, below NORMALIZABLE_ERROR *** */
+ 
+ 	if (g_strcmp0 (mode_orig, mode_new) != 0) {
+@@ -849,6 +910,11 @@ compare_property (NMSetting *setting,
+ 		                      flags);
+ 	}
+ 
++	if (nm_streq (prop_spec->name, NM_SETTING_BOND_CLONED_MAC_ADDRESS)) {
++		return nm_streq0 (NM_SETTING_BOND_GET_PRIVATE (setting)->cloned_mac_address,
++		                  NM_SETTING_BOND_GET_PRIVATE (other)->cloned_mac_address);
++	}
++
+ 	/* Otherwise chain up to parent to handle generic compare */
+ 	parent_class = NM_SETTING_CLASS (nm_setting_bond_parent_class);
+ 	return parent_class->compare_property (setting, other, prop_spec, flags);
+@@ -871,6 +937,8 @@ finalize (GObject *object)
+ 	NMSettingBondPrivate *priv = NM_SETTING_BOND_GET_PRIVATE (object);
+ 
+ 	g_hash_table_destroy (priv->options);
++	g_free (priv->cloned_mac_address);
++	g_free (priv->generate_mac_address_mask);
+ 
+ 	G_OBJECT_CLASS (nm_setting_bond_parent_class)->finalize (object);
+ }
+@@ -886,6 +954,15 @@ set_property (GObject *object, guint prop_id,
+ 		g_hash_table_unref (priv->options);
+ 		priv->options = _nm_utils_copy_strdict (g_value_get_boxed (value));
+ 		break;
++	case PROP_CLONED_MAC_ADDRESS:
++		g_free (priv->cloned_mac_address);
++		priv->cloned_mac_address = _nm_utils_hwaddr_canonical_or_invalid (g_value_get_string (value),
++		                                                                  ETH_ALEN);
++		break;
++	case PROP_GENERATE_MAC_ADDRESS_MASK:
++		g_free (priv->generate_mac_address_mask);
++		priv->generate_mac_address_mask = g_value_dup_string (value);
++		break;
+ 	default:
+ 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+ 		break;
+@@ -902,6 +979,12 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_OPTIONS:
+ 		g_value_take_boxed (value, _nm_utils_copy_strdict (priv->options));
+ 		break;
++	case PROP_CLONED_MAC_ADDRESS:
++		g_value_set_string (value, nm_setting_bond_get_cloned_mac_address (setting));
++		break;
++	case PROP_GENERATE_MAC_ADDRESS_MASK:
++		g_value_set_string (value, nm_setting_bond_get_generate_mac_address_mask (setting));
++		break;
+ 	default:
+ 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+ 		break;
+@@ -952,7 +1035,110 @@ nm_setting_bond_class_init (NMSettingBondClass *setting_class)
+ 	                                       _nm_utils_strdict_to_dbus,
+ 	                                       _nm_utils_strdict_from_dbus);
+ 
+-	 /* ---dbus---
++	/**
++	 * NMSettingBond:cloned-mac-address:
++	 *
++	 * If specified, request that the device use this MAC address instead.
++	 * This is known as MAC cloning or spoofing.
++	 *
++	 * Beside explicitly specifing a MAC address, the special values "preserve", "permanent",
++	 * "random" and "stable" are supported.
++	 * "preserve" means not to touch the MAC address on activation.
++	 * "permanent" means to use the permanent hardware address of the device.
++	 * "random" creates a random MAC address on each connect.
++	 * "stable" creates a hashed MAC address based on connection.stable-id and a
++	 * machine dependent key.
++	 *
++	 * If unspecified, the value can be overwritten via global defaults, see manual
++	 * of NetworkManager.conf. If still unspecified, it defaults to "preserve"
++	 * (older versions of NetworkManager may use a different default value).
++	 *
++	 * On D-Bus, this field is expressed as "assigned-mac-address" or the deprecated
++	 * "cloned-mac-address".
++	 **/
++	/* ---keyfile---
++	 * property: cloned-mac-address
++	 * format: usual hex-digits-and-colons notation
++	 * description: Cloned MAC address in traditional hex-digits-and-colons notation
++	 *   (e.g. 00:22:68:12:79:B2), or semicolon separated list of 6 bytes (obsolete)
++	 *   (e.g. 0;34;104;18;121;178).
++	 * ---end---
++	 * ---ifcfg-rh---
++	 * property: cloned-mac-address
++	 * variable: MACADDR
++	 * description: Cloned (spoofed) MAC address in traditional hex-digits-and-colons
++	 *    notation (e.g. 00:22:68:14:5A:99).
++	 * ---end---
++	 * ---dbus---
++	 * property: cloned-mac-address
++	 * format: byte array
++	 * description: This D-Bus field is deprecated in favor of "assigned-mac-address"
++	 *    which is more flexible and allows specifying special variants like "random".
++	 *    For libnm and nmcli, this field is called "cloned-mac-address".
++	 * ---end---
++	 */
++	g_object_class_install_property
++		(object_class, PROP_CLONED_MAC_ADDRESS,
++		 g_param_spec_string (NM_SETTING_BOND_CLONED_MAC_ADDRESS, "", "",
++		                      NULL,
++		                      G_PARAM_READWRITE |
++		                      NM_SETTING_PARAM_INFERRABLE |
++		                      G_PARAM_STATIC_STRINGS));
++	_nm_setting_class_override_property (setting_class,
++	                                     NM_SETTING_BOND_CLONED_MAC_ADDRESS,
++	                                     G_VARIANT_TYPE_BYTESTRING,
++	                                     _nm_utils_hwaddr_cloned_get,
++	                                     _nm_utils_hwaddr_cloned_set,
++	                                     _nm_utils_hwaddr_cloned_not_set);
++
++	/**
++	 * NMSettingBond:generate-mac-address-mask:
++	 *
++	 * With #NMSettingWired:cloned-mac-address setting "random" or "stable",
++	 * by default all bits of the MAC address are scrambled and a locally-administered,
++	 * unicast MAC address is created. This property allows to specify that certain bits
++	 * are fixed. Note that the least significant bit of the first MAC address will
++	 * always be unset to create a unicast MAC address.
++	 *
++	 * If the property is %NULL, it is eligible to be overwritten by a default
++	 * connection setting. If the value is still %NULL or an empty string, the
++	 * default is to create a locally-administered, unicast MAC address.
++	 *
++	 * If the value contains one MAC address, this address is used as mask. The set
++	 * bits of the mask are to be filled with the current MAC address of the device,
++	 * while the unset bits are subject to randomization.
++	 * Setting "FE:FF:FF:00:00:00" means to preserve the OUI of the current MAC address
++	 * and only randomize the lower 3 bytes using the "random" or "stable" algorithm.
++	 *
++	 * If the value contains one additional MAC address after the mask,
++	 * this address is used instead of the current MAC address to fill the bits
++	 * that shall not be randomized. For example, a value of
++	 * "FE:FF:FF:00:00:00 68:F7:28:00:00:00" will set the OUI of the MAC address
++	 * to 68:F7:28, while the lower bits are randomized. A value of
++	 * "02:00:00:00:00:00 00:00:00:00:00:00" will create a fully scrambled
++	 * globally-administered, burned-in MAC address.
++	 *
++	 * If the value contains more then one additional MAC addresses, one of
++	 * them is chosen randomly. For example, "02:00:00:00:00:00 00:00:00:00:00:00 02:00:00:00:00:00"
++	 * will create a fully scrambled MAC address, randomly locally or globally
++	 * administered.
++	 **/
++	/* ---ifcfg-rh---
++	 * property: generate-mac-address-mask
++	 * variable: GENERATE_MAC_ADDRESS_MASK(+)
++	 * description: the MAC address mask for generating randomized and stable
++	 *   cloned-mac-address.
++	 * ---end---
++	 */
++	g_object_class_install_property
++	    (object_class, PROP_GENERATE_MAC_ADDRESS_MASK,
++	     g_param_spec_string (NM_SETTING_BOND_GENERATE_MAC_ADDRESS_MASK, "", "",
++	                          NULL,
++	                          G_PARAM_READWRITE |
++	                          NM_SETTING_PARAM_FUZZY_IGNORE |
++	                          G_PARAM_STATIC_STRINGS));
++
++	/* ---dbus---
+ 	  * property: interface-name
+ 	  * format: string
+ 	  * description: Deprecated in favor of connection.interface-name, but can
+diff --git a/libnm-core/nm-setting-bond.h b/libnm-core/nm-setting-bond.h
+index e2d8f9b..8482651 100644
+--- a/libnm-core/nm-setting-bond.h
++++ b/libnm-core/nm-setting-bond.h
+@@ -39,6 +39,8 @@ G_BEGIN_DECLS
+ 
+ #define NM_SETTING_BOND_SETTING_NAME "bond"
+ 
++#define NM_SETTING_BOND_CLONED_MAC_ADDRESS "cloned-mac-address"
++#define NM_SETTING_BOND_GENERATE_MAC_ADDRESS_MASK "generate-mac-address-mask"
+ #define NM_SETTING_BOND_OPTIONS "options"
+ 
+ /* Valid options for the 'options' property */
