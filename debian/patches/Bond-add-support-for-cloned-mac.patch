@@ -4,9 +4,9 @@ Subject: Bond: add support for cloned mac
 
 ---
  clients/tui/nmt-page-bond.c  |   7 ++
- libnm-core/nm-setting-bond.c | 188 ++++++++++++++++++++++++++++++++++++++++++-
+ libnm-core/nm-setting-bond.c | 190 ++++++++++++++++++++++++++++++++++++++++++-
  libnm-core/nm-setting-bond.h |   2 +
- 3 files changed, 196 insertions(+), 1 deletion(-)
+ 3 files changed, 197 insertions(+), 2 deletions(-)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..a54ef17 100644
@@ -34,9 +34,21 @@ index 48070db..a54ef17 100644
  	g_signal_connect (widget, "notify::active-id",
  	                  G_CALLBACK (mode_widget_changed), bond);
 diff --git a/libnm-core/nm-setting-bond.c b/libnm-core/nm-setting-bond.c
-index 9a8bdc3..056b422 100644
+index 9a8bdc3..d59db25 100644
 --- a/libnm-core/nm-setting-bond.c
 +++ b/libnm-core/nm-setting-bond.c
+@@ -28,10 +28,10 @@
+ #include <arpa/inet.h>
+ 
+ #include "nm-setting-bond.h"
++#include "nm-common-macros.h"
+ #include "nm-utils.h"
+ #include "nm-utils-private.h"
+ #include "nm-connection-private.h"
+-#include "nm-setting-infiniband.h"
+ #include "nm-core-internal.h"
+ 
+ /**
 @@ -49,11 +49,15 @@ NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_BOND)
  #define NM_SETTING_BOND_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_BOND, NMSettingBondPrivate))
  
