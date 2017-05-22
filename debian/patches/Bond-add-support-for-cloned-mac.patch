@@ -3,11 +3,11 @@ Date: Sun, 21 May 2017 17:07:17 -0400
 Subject: Bond: add support for cloned mac
 
 ---
- clients/tui/nmt-page-bond.c | 32 ++++++++++++++++++++++++++++++++
- 1 file changed, 32 insertions(+)
+ clients/tui/nmt-page-bond.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
-index 48070db..30b3770 100644
+index 48070db..b17bb05 100644
 --- a/clients/tui/nmt-page-bond.c
 +++ b/clients/tui/nmt-page-bond.c
 @@ -29,6 +29,7 @@
@@ -35,24 +35,21 @@ index 48070db..30b3770 100644
  	NMSettingBond *s_bond;
  	NmtNewtWidget *widget, *label;
  	NMConnection *conn;
-@@ -348,6 +352,16 @@ nmt_page_bond_constructed (GObject *object)
+@@ -348,6 +352,13 @@ nmt_page_bond_constructed (GObject *object)
  	}
  	priv->s_bond = s_bond;
  
 +	s_wired = nm_connection_get_setting_wired (conn);
 +	if (!s_wired) {
-+		/* It makes things simpler if we always have a NMSettingWired;
-+		 * we'll hold a ref on one, and add it to and remove it from
-+		 * the connection as needed.
-+		 */
-+		s_wired = NM_SETTING_WIRED (nm_setting_wired_new ());
++		nm_connection_add_setting (conn, nm_setting_wired_new ());
++		s_wired = nm_connection_get_setting_wired (conn);
 +	}
-+	priv->s_wired = g_object_ref_sink (s_wired);
++	priv->s_wired = s_wired;
 +
  	section = nmt_editor_section_new (_("BOND"), NULL, TRUE);
  	grid = nmt_editor_section_get_body (section);
  
-@@ -361,6 +375,12 @@ nmt_page_bond_constructed (GObject *object)
+@@ -361,6 +372,12 @@ nmt_page_bond_constructed (GObject *object)
  	nmt_editor_grid_append (grid, NULL, widget, NULL);
  	priv->slaves = NMT_SLAVE_LIST (widget);
  
@@ -65,28 +62,10 @@ index 48070db..30b3770 100644
  	widget = nmt_newt_popup_new (bond_mode);
  	g_signal_connect (widget, "notify::active-id",
  	                  G_CALLBACK (mode_widget_changed), bond);
-@@ -432,6 +452,16 @@ nmt_page_bond_saved (NmtEditorPage *editor_page)
- }
- 
- static void
-+nmt_page_bond_finalize (GObject *object)
-+{
-+	NmtPageBondPrivate *priv = NMT_PAGE_BOND_GET_PRIVATE (object);
-+
-+	g_clear_object (&priv->s_wired);
-+
-+	G_OBJECT_CLASS (nmt_page_bond_parent_class)->finalize (object);
-+}
-+
-+static void
- nmt_page_bond_class_init (NmtPageBondClass *bond_class)
- {
- 	GObjectClass *object_class = G_OBJECT_CLASS (bond_class);
-@@ -440,5 +470,7 @@ nmt_page_bond_class_init (NmtPageBondClass *bond_class)
+@@ -440,5 +457,6 @@ nmt_page_bond_class_init (NmtPageBondClass *bond_class)
  	g_type_class_add_private (bond_class, sizeof (NmtPageBondPrivate));
  
  	object_class->constructed = nmt_page_bond_constructed;
-+	object_class->finalize    = nmt_page_bond_finalize;
 +
  	editor_page_class->saved = nmt_page_bond_saved;
  }
