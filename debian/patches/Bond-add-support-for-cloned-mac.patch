@@ -4,8 +4,7 @@ Subject: Bond: add support for cloned mac
 
 ---
  clients/tui/nmt-page-bond.c | 32 ++++++++++++++++++++++++++++++++
- libnm-core/nm-connection.c  |  2 +-
- 2 files changed, 33 insertions(+), 1 deletion(-)
+ 1 file changed, 32 insertions(+)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..30b3770 100644
@@ -91,16 +90,3 @@ index 48070db..30b3770 100644
 +
  	editor_page_class->saved = nmt_page_bond_saved;
  }
-diff --git a/libnm-core/nm-connection.c b/libnm-core/nm-connection.c
-index ecfb978..5838c35 100644
---- a/libnm-core/nm-connection.c
-+++ b/libnm-core/nm-connection.c
-@@ -993,7 +993,7 @@ _normalize_team_port_config (NMConnection *self, GHashTable *parameters)
- static gboolean
- _normalize_required_settings (NMConnection *self, GHashTable *parameters)
- {
--	if (nm_connection_get_setting_vlan (self)) {
-+	if (nm_connection_get_setting_vlan (self) || nm_connection_get_setting_bond (self)) {
- 		if (!nm_connection_get_setting_wired (self)) {
- 			nm_connection_add_setting (self, nm_setting_wired_new ());
- 			return TRUE;
