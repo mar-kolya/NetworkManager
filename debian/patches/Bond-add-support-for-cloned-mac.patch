@@ -4,9 +4,9 @@ Subject: Bond: add support for cloned mac
 
 ---
  clients/tui/nmt-page-bond.c  |   7 ++
- libnm-core/nm-setting-bond.c | 190 ++++++++++++++++++++++++++++++++++++++++++-
+ libnm-core/nm-setting-bond.c | 191 ++++++++++++++++++++++++++++++++++++++++++-
  libnm-core/nm-setting-bond.h |   2 +
- 3 files changed, 197 insertions(+), 2 deletions(-)
+ 3 files changed, 198 insertions(+), 2 deletions(-)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..a54ef17 100644
@@ -34,7 +34,7 @@ index 48070db..a54ef17 100644
  	g_signal_connect (widget, "notify::active-id",
  	                  G_CALLBACK (mode_widget_changed), bond);
 diff --git a/libnm-core/nm-setting-bond.c b/libnm-core/nm-setting-bond.c
-index 9a8bdc3..d59db25 100644
+index 9a8bdc3..879f524 100644
 --- a/libnm-core/nm-setting-bond.c
 +++ b/libnm-core/nm-setting-bond.c
 @@ -28,10 +28,10 @@
@@ -104,7 +104,15 @@ index 9a8bdc3..d59db25 100644
  static gboolean
  verify (NMSetting *setting, NMConnection *connection, GError **error)
  {
-@@ -764,6 +800,31 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
+@@ -542,6 +578,7 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
+ 	const char *arp_ip_target = NULL;
+ 	const char *lacp_rate;
+ 	const char *primary;
++	GError *local = NULL;
+ 
+ 	g_hash_table_iter_init (&iter, priv->options);
+ 	while (g_hash_table_iter_next (&iter, (gpointer) &key, (gpointer) &value)) {
+@@ -764,6 +801,31 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
  	if (!_nm_connection_verify_required_interface_name (connection, error))
  		return FALSE;
  
@@ -136,7 +144,7 @@ index 9a8bdc3..d59db25 100644
  	/* *** errors above here should be always fatal, below NORMALIZABLE_ERROR *** */
  
  	if (g_strcmp0 (mode_orig, mode_new) != 0) {
-@@ -849,6 +910,11 @@ compare_property (NMSetting *setting,
+@@ -849,6 +911,11 @@ compare_property (NMSetting *setting,
  		                      flags);
  	}
  
@@ -148,7 +156,7 @@ index 9a8bdc3..d59db25 100644
  	/* Otherwise chain up to parent to handle generic compare */
  	parent_class = NM_SETTING_CLASS (nm_setting_bond_parent_class);
  	return parent_class->compare_property (setting, other, prop_spec, flags);
-@@ -871,6 +937,8 @@ finalize (GObject *object)
+@@ -871,6 +938,8 @@ finalize (GObject *object)
  	NMSettingBondPrivate *priv = NM_SETTING_BOND_GET_PRIVATE (object);
  
  	g_hash_table_destroy (priv->options);
@@ -157,7 +165,7 @@ index 9a8bdc3..d59db25 100644
  
  	G_OBJECT_CLASS (nm_setting_bond_parent_class)->finalize (object);
  }
-@@ -886,6 +954,15 @@ set_property (GObject *object, guint prop_id,
+@@ -886,6 +955,15 @@ set_property (GObject *object, guint prop_id,
  		g_hash_table_unref (priv->options);
  		priv->options = _nm_utils_copy_strdict (g_value_get_boxed (value));
  		break;
@@ -173,7 +181,7 @@ index 9a8bdc3..d59db25 100644
  	default:
  		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
  		break;
-@@ -902,6 +979,12 @@ get_property (GObject *object, guint prop_id,
+@@ -902,6 +980,12 @@ get_property (GObject *object, guint prop_id,
  	case PROP_OPTIONS:
  		g_value_take_boxed (value, _nm_utils_copy_strdict (priv->options));
  		break;
@@ -186,7 +194,7 @@ index 9a8bdc3..d59db25 100644
  	default:
  		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
  		break;
-@@ -952,7 +1035,110 @@ nm_setting_bond_class_init (NMSettingBondClass *setting_class)
+@@ -952,7 +1036,110 @@ nm_setting_bond_class_init (NMSettingBondClass *setting_class)
  	                                       _nm_utils_strdict_to_dbus,
  	                                       _nm_utils_strdict_from_dbus);
  
