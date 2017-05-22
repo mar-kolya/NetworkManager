@@ -3,11 +3,25 @@ Date: Sun, 21 May 2017 17:07:17 -0400
 Subject: Bond: add support for cloned mac
 
 ---
- clients/tui/nmt-page-bond.c  |  32 +++++++
- libnm-core/nm-setting-bond.c | 194 ++++++++++++++++++++++++++++++++++++++++++-
- libnm-core/nm-setting-bond.h |   2 +
- 3 files changed, 225 insertions(+), 3 deletions(-)
+ clients/common/settings-docs.c.in |   2 +
+ clients/tui/nmt-page-bond.c       |  32 +++++++
+ libnm-core/nm-setting-bond.c      | 194 +++++++++++++++++++++++++++++++++++++-
+ libnm-core/nm-setting-bond.h      |   2 +
+ 4 files changed, 227 insertions(+), 3 deletions(-)
 
+diff --git a/clients/common/settings-docs.c.in b/clients/common/settings-docs.c.in
+index c4e1a3e..051cd24 100644
+--- a/clients/common/settings-docs.c.in
++++ b/clients/common/settings-docs.c.in
+@@ -112,6 +112,8 @@
+ #define DESCRIBE_DOC_NM_SETTING_BLUETOOTH_BDADDR N_("The Bluetooth address of the device.")
+ #define DESCRIBE_DOC_NM_SETTING_BLUETOOTH_NAME N_("The setting's name, which uniquely identifies the setting within the connection.  Each setting type has a name unique to that type, for example \"ppp\" or \"wireless\" or \"wired\".")
+ #define DESCRIBE_DOC_NM_SETTING_BLUETOOTH_TYPE N_("Either \"dun\" for Dial-Up Networking connections or \"panu\" for Personal Area Networking connections to devices supporting the NAP profile.")
++#define DESCRIBE_DOC_NM_SETTING_BOND_CLONED_MAC_ADDRESS N_("If specified, request that the device use this MAC address instead. This is known as MAC cloning or spoofing. Beside explicitly specifing a MAC address, the special values \"preserve\", \"permanent\", \"random\" and \"stable\" are supported. \"preserve\" means not to touch the MAC address on activation. \"permanent\" means to use the permanent hardware address of the device. \"random\" creates a random MAC address on each connect. \"stable\" creates a hashed MAC address based on connection.stable-id and a machine dependent key. If unspecified, the value can be overwritten via global defaults, see manual of NetworkManager.conf. If still unspecified, it defaults to \"preserve\" (older versions of NetworkManager may use a different default value). On D-Bus, this field is expressed as \"assigned-mac-address\" or the deprecated \"cloned-mac-address\".")
++#define DESCRIBE_DOC_NM_SETTING_BOND_GENERATE_MAC_ADDRESS_MASK N_("With \"cloned-mac-address\" setting \"random\" or \"stable\", by default all bits of the MAC address are scrambled and a locally-administered, unicast MAC address is created. This property allows to specify that certain bits are fixed. Note that the least significant bit of the first MAC address will always be unset to create a unicast MAC address. If the property is NULL, it is eligible to be overwritten by a default connection setting. If the value is still NULL or an empty string, the default is to create a locally-administered, unicast MAC address. If the value contains one MAC address, this address is used as mask. The set bits of the mask are to be filled with the current MAC address of the device, while the unset bits are subject to randomization. Setting \"FE:FF:FF:00:00:00\" means to preserve the OUI of the current MAC address and only randomize the lower 3 bytes using the \"random\" or \"stable\" algorithm. If the value contains one additional MAC address after the mask, this address is used instead of the current MAC address to fill the bits that shall not be randomized. For example, a value of \"FE:FF:FF:00:00:00 68:F7:28:00:00:00\" will set the OUI of the MAC address to 68:F7:28, while the lower bits are randomized. A value of \"02:00:00:00:00:00 00:00:00:00:00:00\" will create a fully scrambled globally-administered, burned-in MAC address. If the value contains more then one additional MAC addresses, one of them is chosen randomly. For example, \"02:00:00:00:00:00 00:00:00:00:00:00 02:00:00:00:00:00\" will create a fully scrambled MAC address, randomly locally or globally administered.")
+ #define DESCRIBE_DOC_NM_SETTING_BOND_NAME N_("The setting's name, which uniquely identifies the setting within the connection.  Each setting type has a name unique to that type, for example \"ppp\" or \"wireless\" or \"wired\".")
+ #define DESCRIBE_DOC_NM_SETTING_BOND_OPTIONS N_("Dictionary of key/value pairs of bonding options.  Both keys and values must be strings. Option names must contain only alphanumeric characters (ie, [a-zA-Z0-9]).")
+ #define DESCRIBE_DOC_NM_SETTING_BRIDGE_AGEING_TIME N_("The Ethernet MAC address aging time, in seconds.")
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..30b3770 100644
 --- a/clients/tui/nmt-page-bond.c
