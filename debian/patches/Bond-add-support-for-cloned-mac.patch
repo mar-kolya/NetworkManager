@@ -4,9 +4,9 @@ Subject: Bond: add support for cloned mac
 
 ---
  clients/tui/nmt-page-bond.c  |   7 ++
- libnm-core/nm-setting-bond.c | 191 ++++++++++++++++++++++++++++++++++++++++++-
+ libnm-core/nm-setting-bond.c | 194 ++++++++++++++++++++++++++++++++++++++++++-
  libnm-core/nm-setting-bond.h |   2 +
- 3 files changed, 198 insertions(+), 2 deletions(-)
+ 3 files changed, 200 insertions(+), 3 deletions(-)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..a54ef17 100644
@@ -34,7 +34,7 @@ index 48070db..a54ef17 100644
  	g_signal_connect (widget, "notify::active-id",
  	                  G_CALLBACK (mode_widget_changed), bond);
 diff --git a/libnm-core/nm-setting-bond.c b/libnm-core/nm-setting-bond.c
-index 9a8bdc3..879f524 100644
+index 9a8bdc3..583b097 100644
 --- a/libnm-core/nm-setting-bond.c
 +++ b/libnm-core/nm-setting-bond.c
 @@ -28,10 +28,10 @@
@@ -181,7 +181,15 @@ index 9a8bdc3..879f524 100644
  	default:
  		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
  		break;
-@@ -902,6 +980,12 @@ get_property (GObject *object, guint prop_id,
+@@ -896,12 +974,19 @@ static void
+ get_property (GObject *object, guint prop_id,
+               GValue *value, GParamSpec *pspec)
+ {
+-	NMSettingBondPrivate *priv = NM_SETTING_BOND_GET_PRIVATE (object);
++	NMSettingBond *setting = NM_SETTING_BOND (object);
++	NMSettingBondPrivate *priv = NM_SETTING_BOND_GET_PRIVATE (setting);
+ 
+ 	switch (prop_id) {
  	case PROP_OPTIONS:
  		g_value_take_boxed (value, _nm_utils_copy_strdict (priv->options));
  		break;
@@ -194,7 +202,7 @@ index 9a8bdc3..879f524 100644
  	default:
  		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
  		break;
-@@ -952,7 +1036,110 @@ nm_setting_bond_class_init (NMSettingBondClass *setting_class)
+@@ -952,7 +1037,110 @@ nm_setting_bond_class_init (NMSettingBondClass *setting_class)
  	                                       _nm_utils_strdict_to_dbus,
  	                                       _nm_utils_strdict_from_dbus);
  
