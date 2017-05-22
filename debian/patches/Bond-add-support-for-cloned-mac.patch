@@ -4,7 +4,8 @@ Subject: Bond: add support for cloned mac
 
 ---
  clients/tui/nmt-page-bond.c | 18 ++++++++++++++++++
- 1 file changed, 18 insertions(+)
+ clients/tui/nmt-page-vlan.c |  5 +++--
+ 2 files changed, 21 insertions(+), 2 deletions(-)
 
 diff --git a/clients/tui/nmt-page-bond.c b/clients/tui/nmt-page-bond.c
 index 48070db..b17bb05 100644
@@ -69,3 +70,20 @@ index 48070db..b17bb05 100644
 +
  	editor_page_class->saved = nmt_page_bond_saved;
  }
+diff --git a/clients/tui/nmt-page-vlan.c b/clients/tui/nmt-page-vlan.c
+index 9cd6542..8ad8a47 100644
+--- a/clients/tui/nmt-page-vlan.c
++++ b/clients/tui/nmt-page-vlan.c
+@@ -87,9 +87,10 @@ nmt_page_vlan_constructed (GObject *object)
+ 		 * we'll hold a ref on one, and add it to and remove it from
+ 		 * the connection as needed.
+ 		 */
+-		s_wired = NM_SETTING_WIRED (nm_setting_wired_new ());
++		nm_connection_add_setting (conn, nm_setting_wired_new ());
++		s_wired = nm_connection_get_setting_wired (conn);
+ 	}
+-	priv->s_wired = g_object_ref_sink (s_wired);
++	//priv->s_wired = g_object_ref_sink (s_wired);
+ 
+ 	section = nmt_editor_section_new (_("VLAN"), NULL, TRUE);
+ 	grid = nmt_editor_section_get_body (section);
