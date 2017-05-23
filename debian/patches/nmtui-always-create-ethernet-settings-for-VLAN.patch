@@ -11,11 +11,11 @@ to go, edit saved connection to add it again.
 
 Signed-off-by: Nikolay Martynov <mar.kolya@gmail.com>
 ---
- clients/tui/nmt-page-vlan.c | 20 ++------------------
- 1 file changed, 2 insertions(+), 18 deletions(-)
+ clients/tui/nmt-page-vlan.c | 21 ++-------------------
+ 1 file changed, 2 insertions(+), 19 deletions(-)
 
 diff --git a/clients/tui/nmt-page-vlan.c b/clients/tui/nmt-page-vlan.c
-index 9cd6542..5d8f48b 100644
+index 9cd6542..4b9e2c8 100644
 --- a/clients/tui/nmt-page-vlan.c
 +++ b/clients/tui/nmt-page-vlan.c
 @@ -35,7 +35,6 @@ G_DEFINE_TYPE (NmtPageVlan, nmt_page_vlan, NMT_TYPE_EDITOR_PAGE_DEVICE)
@@ -26,7 +26,15 @@ index 9cd6542..5d8f48b 100644
  
  } NmtPageVlanPrivate;
  
-@@ -83,13 +82,9 @@ nmt_page_vlan_constructed (GObject *object)
+@@ -67,7 +66,6 @@ static void
+ nmt_page_vlan_constructed (GObject *object)
+ {
+ 	NmtPageVlan *vlan = NMT_PAGE_VLAN (object);
+-	NmtPageVlanPrivate *priv = NMT_PAGE_VLAN_GET_PRIVATE (vlan);
+ 	NmtEditorSection *section;
+ 	NmtEditorGrid *grid;
+ 	NMSettingWired *s_wired;
+@@ -83,13 +81,9 @@ nmt_page_vlan_constructed (GObject *object)
  	}
  	s_wired = nm_connection_get_setting_wired (conn);
  	if (!s_wired) {
@@ -36,13 +44,13 @@ index 9cd6542..5d8f48b 100644
 -		 */
 -		s_wired = NM_SETTING_WIRED (nm_setting_wired_new ());
 +		nm_connection_add_setting (conn, nm_setting_wired_new ());
-+		s_wired = nm_connection_get_setting_vlan (conn);
++		s_wired = nm_connection_get_setting_wired (conn);
  	}
 -	priv->s_wired = g_object_ref_sink (s_wired);
  
  	section = nmt_editor_section_new (_("VLAN"), NULL, TRUE);
  	grid = nmt_editor_section_get_body (section);
-@@ -133,16 +128,6 @@ nmt_page_vlan_constructed (GObject *object)
+@@ -133,16 +127,6 @@ nmt_page_vlan_constructed (GObject *object)
  }
  
  static void
@@ -59,7 +67,7 @@ index 9cd6542..5d8f48b 100644
  nmt_page_vlan_class_init (NmtPageVlanClass *vlan_class)
  {
  	GObjectClass *object_class = G_OBJECT_CLASS (vlan_class);
-@@ -151,5 +136,4 @@ nmt_page_vlan_class_init (NmtPageVlanClass *vlan_class)
+@@ -151,5 +135,4 @@ nmt_page_vlan_class_init (NmtPageVlanClass *vlan_class)
  
  	/* virtual methods */
  	object_class->constructed = nmt_page_vlan_constructed;
