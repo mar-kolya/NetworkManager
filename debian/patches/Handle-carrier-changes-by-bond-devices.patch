@@ -10,7 +10,7 @@ devices. With this patch:
 * Reconnecting cable to one of the slaves makes bond interface reistablish its IP configuration.
 
 With this patch bond interface is made to work like any other interface supporting carrier.
-This patch has also been tested with bond interface havind one ethernet and one wifi device - and it works as expected.
+This patch has also been tested with bond interface having one ethernet and one wifi device - and it works as expected.
 
 This patch allows one to have bond interface between wifi and ethernet and stil be able to connect to other wifi networks and not have ip config or routing clashes.
 
