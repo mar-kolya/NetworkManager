@@ -14,23 +14,29 @@ Similar problem existed for wireless security and wifi
 
 Signed-off-by: Nikolay Martynov <mar.kolya@gmail.com>
 ---
- clients/tui/nmt-page-vlan.c | 21 ++-------------------
- clients/tui/nmt-page-wifi.c | 22 +++-------------------
- 2 files changed, 5 insertions(+), 38 deletions(-)
+ clients/tui/nmt-page-vlan.c | 29 ++---------------------------
+ clients/tui/nmt-page-wifi.c | 31 +++----------------------------
+ 2 files changed, 5 insertions(+), 55 deletions(-)
 
 diff --git a/clients/tui/nmt-page-vlan.c b/clients/tui/nmt-page-vlan.c
-index 9cd6542..4b9e2c8 100644
+index 9cd6542..5ff3fa5 100644
 --- a/clients/tui/nmt-page-vlan.c
 +++ b/clients/tui/nmt-page-vlan.c
-@@ -35,7 +35,6 @@ G_DEFINE_TYPE (NmtPageVlan, nmt_page_vlan, NMT_TYPE_EDITOR_PAGE_DEVICE)
- #define NMT_PAGE_VLAN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NMT_TYPE_PAGE_VLAN, NmtPageVlanPrivate))
+@@ -32,13 +32,6 @@
  
- typedef struct {
+ G_DEFINE_TYPE (NmtPageVlan, nmt_page_vlan, NMT_TYPE_EDITOR_PAGE_DEVICE)
+ 
+-#define NMT_PAGE_VLAN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NMT_TYPE_PAGE_VLAN, NmtPageVlanPrivate))
+-
+-typedef struct {
 -	NMSettingWired *s_wired;
- 
- } NmtPageVlanPrivate;
- 
-@@ -67,7 +66,6 @@ static void
+-
+-} NmtPageVlanPrivate;
+-
+ NmtEditorPage *
+ nmt_page_vlan_new (NMConnection   *conn,
+                    NmtDeviceEntry *deventry)
+@@ -67,7 +60,6 @@ static void
  nmt_page_vlan_constructed (GObject *object)
  {
  	NmtPageVlan *vlan = NMT_PAGE_VLAN (object);
@@ -38,7 +44,7 @@ index 9cd6542..4b9e2c8 100644
  	NmtEditorSection *section;
  	NmtEditorGrid *grid;
  	NMSettingWired *s_wired;
-@@ -83,13 +81,9 @@ nmt_page_vlan_constructed (GObject *object)
+@@ -83,13 +75,9 @@ nmt_page_vlan_constructed (GObject *object)
  	}
  	s_wired = nm_connection_get_setting_wired (conn);
  	if (!s_wired) {
@@ -54,7 +60,7 @@ index 9cd6542..4b9e2c8 100644
  
  	section = nmt_editor_section_new (_("VLAN"), NULL, TRUE);
  	grid = nmt_editor_section_get_body (section);
-@@ -133,16 +127,6 @@ nmt_page_vlan_constructed (GObject *object)
+@@ -133,23 +121,10 @@ nmt_page_vlan_constructed (GObject *object)
  }
  
  static void
@@ -71,25 +77,40 @@ index 9cd6542..4b9e2c8 100644
  nmt_page_vlan_class_init (NmtPageVlanClass *vlan_class)
  {
  	GObjectClass *object_class = G_OBJECT_CLASS (vlan_class);
-@@ -151,5 +135,4 @@ nmt_page_vlan_class_init (NmtPageVlanClass *vlan_class)
  
+-	g_type_class_add_private (vlan_class, sizeof (NmtPageVlanPrivate));
+-
  	/* virtual methods */
  	object_class->constructed = nmt_page_vlan_constructed;
 -	object_class->finalize    = nmt_page_vlan_finalize;
  }
 diff --git a/clients/tui/nmt-page-wifi.c b/clients/tui/nmt-page-wifi.c
-index 35625fe..5b83d4e 100644
+index 35625fe..7d734f0 100644
 --- a/clients/tui/nmt-page-wifi.c
 +++ b/clients/tui/nmt-page-wifi.c
-@@ -41,7 +41,6 @@ G_DEFINE_TYPE (NmtPageWifi, nmt_page_wifi, NMT_TYPE_EDITOR_PAGE_DEVICE)
- #define NMT_PAGE_WIFI_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NMT_TYPE_PAGE_WIFI, NmtPageWifiPrivate))
+@@ -38,13 +38,6 @@
  
- typedef struct {
+ G_DEFINE_TYPE (NmtPageWifi, nmt_page_wifi, NMT_TYPE_EDITOR_PAGE_DEVICE)
+ 
+-#define NMT_PAGE_WIFI_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NMT_TYPE_PAGE_WIFI, NmtPageWifiPrivate))
+-
+-typedef struct {
 -	NMSettingWirelessSecurity *s_wsec;
- 
- } NmtPageWifiPrivate;
- 
-@@ -198,13 +197,10 @@ nmt_page_wifi_constructed (GObject *object)
+-
+-} NmtPageWifiPrivate;
+-
+ NmtEditorPage *
+ nmt_page_wifi_new (NMConnection   *conn,
+                    NmtDeviceEntry *deventry)
+@@ -177,7 +170,6 @@ ssid_transform_from_entry (GBinding     *binding,
+ static void
+ nmt_page_wifi_constructed (GObject *object)
+ {
+-	NmtPageWifiPrivate *priv = NMT_PAGE_WIFI_GET_PRIVATE (object);
+ 	NmtPageWifi *wifi = NMT_PAGE_WIFI (object);
+ 	NmtDeviceEntry *deventry;
+ 	NmtEditorSection *section;
+@@ -198,13 +190,10 @@ nmt_page_wifi_constructed (GObject *object)
  
  	s_wsec = nm_connection_get_setting_wireless_security (conn);
  	if (!s_wsec) {
@@ -106,7 +127,7 @@ index 35625fe..5b83d4e 100644
  
  	deventry = nmt_editor_page_device_get_device_entry (NMT_EDITOR_PAGE_DEVICE (object));
  	g_object_bind_property (s_wireless, NM_SETTING_WIRELESS_MAC_ADDRESS,
-@@ -375,17 +371,6 @@ nmt_page_wifi_constructed (GObject *object)
+@@ -375,23 +364,9 @@ nmt_page_wifi_constructed (GObject *object)
  }
  
  static void
@@ -124,9 +145,9 @@ index 35625fe..5b83d4e 100644
  nmt_page_wifi_class_init (NmtPageWifiClass *wifi_class)
  {
  	GObjectClass *object_class = G_OBJECT_CLASS (wifi_class);
-@@ -393,5 +378,4 @@ nmt_page_wifi_class_init (NmtPageWifiClass *wifi_class)
- 	g_type_class_add_private (wifi_class, sizeof (NmtPageWifiPrivate));
  
+-	g_type_class_add_private (wifi_class, sizeof (NmtPageWifiPrivate));
+-
  	object_class->constructed = nmt_page_wifi_constructed;
 -	object_class->finalize    = nmt_page_wifi_finalize;
  }
