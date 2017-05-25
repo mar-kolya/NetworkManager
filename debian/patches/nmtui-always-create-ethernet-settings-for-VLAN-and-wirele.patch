@@ -1,6 +1,7 @@
 From: Nikolay Martynov <mar.kolya@gmail.com>
 Date: Mon, 22 May 2017 22:24:44 -0400
-Subject: nmtui: always create ethernet settings for VLAN.
+Subject: nmtui: always create ethernet settings for VLAN and wireless
+ security for wifi.
 
 Ethernet settings for VLAN are always created later in settings
 normalization. We might as well always created them.
@@ -9,10 +10,13 @@ This fixes a user visible problem: currently if user specifies cloned
 mac when connection is created this value doesn't get saved. User has
 to go, edit saved connection to add it again.
 
+Similar problem existed for wireless security and wifi
+
 Signed-off-by: Nikolay Martynov <mar.kolya@gmail.com>
 ---
  clients/tui/nmt-page-vlan.c | 21 ++-------------------
- 1 file changed, 2 insertions(+), 19 deletions(-)
+ clients/tui/nmt-page-wifi.c | 22 +++-------------------
+ 2 files changed, 5 insertions(+), 38 deletions(-)
 
 diff --git a/clients/tui/nmt-page-vlan.c b/clients/tui/nmt-page-vlan.c
 index 9cd6542..4b9e2c8 100644
@@ -72,4 +76,57 @@ index 9cd6542..4b9e2c8 100644
  	/* virtual methods */
  	object_class->constructed = nmt_page_vlan_constructed;
 -	object_class->finalize    = nmt_page_vlan_finalize;
+ }
+diff --git a/clients/tui/nmt-page-wifi.c b/clients/tui/nmt-page-wifi.c
+index 35625fe..5b83d4e 100644
+--- a/clients/tui/nmt-page-wifi.c
++++ b/clients/tui/nmt-page-wifi.c
+@@ -41,7 +41,6 @@ G_DEFINE_TYPE (NmtPageWifi, nmt_page_wifi, NMT_TYPE_EDITOR_PAGE_DEVICE)
+ #define NMT_PAGE_WIFI_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NMT_TYPE_PAGE_WIFI, NmtPageWifiPrivate))
+ 
+ typedef struct {
+-	NMSettingWirelessSecurity *s_wsec;
+ 
+ } NmtPageWifiPrivate;
+ 
+@@ -198,13 +197,10 @@ nmt_page_wifi_constructed (GObject *object)
+ 
+ 	s_wsec = nm_connection_get_setting_wireless_security (conn);
+ 	if (!s_wsec) {
+-		/* It makes things simpler if we always have a
+-		 * NMSettingWirelessSecurity; we'll hold a ref on one, and add
+-		 * it to and remove it from the connection as needed.
+-		 */
+-		s_wsec = NM_SETTING_WIRELESS_SECURITY (nm_setting_wireless_security_new ());
++		nm_connection_add_setting (conn, nm_setting_wireless_security_new ());
++		s_wsec = nm_connection_get_setting_wireless_security (conn);
+ 	}
+-	priv->s_wsec = g_object_ref_sink (s_wsec);
++	s_wsec = nm_connection_get_setting_wireless_security (conn);
+ 
+ 	deventry = nmt_editor_page_device_get_device_entry (NMT_EDITOR_PAGE_DEVICE (object));
+ 	g_object_bind_property (s_wireless, NM_SETTING_WIRELESS_MAC_ADDRESS,
+@@ -375,17 +371,6 @@ nmt_page_wifi_constructed (GObject *object)
+ }
+ 
+ static void
+-nmt_page_wifi_finalize (GObject *object)
+-{
+-	NmtPageWifiPrivate *priv = NMT_PAGE_WIFI_GET_PRIVATE (object);
+-
+-	g_clear_object (&priv->s_wsec);
+-
+-	G_OBJECT_CLASS (nmt_page_wifi_parent_class)->finalize (object);
+-}
+-
+-
+-static void
+ nmt_page_wifi_class_init (NmtPageWifiClass *wifi_class)
+ {
+ 	GObjectClass *object_class = G_OBJECT_CLASS (wifi_class);
+@@ -393,5 +378,4 @@ nmt_page_wifi_class_init (NmtPageWifiClass *wifi_class)
+ 	g_type_class_add_private (wifi_class, sizeof (NmtPageWifiPrivate));
+ 
+ 	object_class->constructed = nmt_page_wifi_constructed;
+-	object_class->finalize    = nmt_page_wifi_finalize;
  }
