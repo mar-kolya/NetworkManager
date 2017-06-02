@@ -1,3 +1,9 @@
+device-rename-activate_stage5_ip4_config_commit-to-activa.patch
+core-add-nm_device_spec_match_list_full.patch
+device-transform-NM_DEVICE_IS_MASTER-gobject-property-to-.patch
+device-handle-unset-ignore-carrier-option-depending-on-de.patch
+device-refactor-how-master-device-s-set-is_available.patch
+device-handle-carrier-changes-for-master-device-different.patch
 Don-t-setup-Sleep-Monitor-if-not-booted-with-systemd.patch
 fix-arping-path.patch
 Fix-iscsiadm-path.patch
@@ -9,3 +15,4 @@ Only-test-team-devices-if-we-built-support-for-them.patch
 libnm-Check-self-still-NMManager-or-not.patch
 dns-manager-don-t-merge-split-DNS-search-domains.patch
 systemd-Don-t-enable-NetworkManager-wait-online.service-s.patch
+Merge-remote-tracking-branch-upstream-th-master-no-ignore.patch

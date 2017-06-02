@@ -1,0 +1,119 @@
+From: Nikolay Martynov <mar.kolya@gmail.com>
+Date: Thu, 1 Jun 2017 23:57:03 +0200
+Subject: device: handle carrier changes for master device differently
+
+For master devices, instead of ignoring loss of carrier entirely,
+handle it.
+
+First of all, master devices are now by default ignore-carrier=yes.
+That means, without explict user configuration in NetworkManager.conf,
+the previous behavior in carrier_changed() does not change.
+
+If the user decides to configure the master device like
+
+    [device-with-carrier]
+    device-match=type:bond,type:bridge,type:master
+    ignore-carrier=no
+
+then, master device will disconnect on carrier loss like
+regular devices.
+
+https://github.com/NetworkManager/NetworkManager/pull/18
+
+Co-authored-by: Thomas Haller <thaller@redhat.com>
+---
+ man/NetworkManager.conf.xml |  9 ++++++++-
+ src/devices/nm-device.c     | 46 ++++++++++++++++++++++++++++++---------------
+ 2 files changed, 39 insertions(+), 16 deletions(-)
+
+diff --git a/man/NetworkManager.conf.xml b/man/NetworkManager.conf.xml
+index 944c4ab..e0f2b1f 100644
+--- a/man/NetworkManager.conf.xml
++++ b/man/NetworkManager.conf.xml
+@@ -233,7 +233,10 @@ no-auto-default=*
+             if specified (See <xref linkend="ignore-carrier"/>).
+             Otherwise, it is a list of matches to specify for which device
+             carrier should be ignored. See <xref linkend="device-spec"/> for the
+-            syntax how to specify a device.
++            syntax how to specify a device. Note that master types like
++            bond, bridge, and team ignore carrier by default. You can however
++            revert that default using the "except:" specifier (or better,
++            use the per-device setting instead of the deprecated setting).
+           </para>
+         </listitem>
+       </varlistentry>
+@@ -840,6 +843,10 @@ unmanaged=1
+               that NetworkManager will not make use of that information.
+             </para>
+             <para>
++              Master types like bond, bridge and team ignore carrier by default,
++              while other device types react on carrier changes by default.
++            </para>
++            <para>
+               This setting overwrites the deprecated <literal>main.ignore-carrier</literal>
+               setting above.
+             </para>
+diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
+index c62e033..833c975 100644
+--- a/src/devices/nm-device.c
++++ b/src/devices/nm-device.c
+@@ -2193,18 +2193,35 @@ carrier_changed (NMDevice *self, gboolean carrier)
+ 		return;
+ 
+ 	if (nm_device_is_master (self)) {
+-		/* Bridge/bond/team carrier does not affect its own activation,
+-		 * but when carrier comes on, if there are slaves waiting,
+-		 * it will restart them.
+-		 */
+-		if (!carrier)
+-			return;
+-
+-		if (nm_device_activate_ip4_state_in_wait (self))
+-			nm_device_activate_stage3_ip4_start (self);
+-		if (nm_device_activate_ip6_state_in_wait (self))
+-			nm_device_activate_stage3_ip6_start (self);
+-
++		if (carrier) {
++			/* Force master to retry getting ip addresses when carrier
++			* is restored. */
++			if (priv->state == NM_DEVICE_STATE_ACTIVATED)
++				nm_device_update_dynamic_ip_setup (self);
++			else {
++				/* Force master to retry getting ip addresses when carrier
++				 * is restored.
++				 */
++				if (nm_device_activate_ip4_state_in_wait (self))
++					nm_device_activate_stage3_ip4_start (self);
++				if (nm_device_activate_ip6_state_in_wait (self))
++					nm_device_activate_stage3_ip6_start (self);
++			}
++		} else {
++			 /* Put master device into DISCONNECTED state if there is
++			  * no carrier. This would mean that all slaves are still
++			  * enslaved. This is nessesary to be able to reconnect
++			  * when carrier appears.
++			  */
++			if (priv->state == NM_DEVICE_STATE_DISCONNECTED) {
++				if (   priv->queued_state.id
++				    && priv->queued_state.state >= NM_DEVICE_STATE_PREPARE)
++					queued_state_clear (self);
++			} else {
++				nm_device_queue_state (self, NM_DEVICE_STATE_DISCONNECTED,
++				                       NM_DEVICE_STATE_REASON_CARRIER);
++			}
++		}
+ 		return;
+ 	} else if (priv->is_enslaved && !carrier) {
+ 		/* Slaves don't deactivate when they lose carrier; for
+@@ -3752,9 +3769,8 @@ nm_device_is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+ gboolean
+ nm_device_ignore_carrier_by_default (NMDevice *self)
+ {
+-	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
+-
+-	return FALSE;
++	/* master types ignore-carrier by default. */
++	return nm_device_is_master (self);
+ }
+ 
+ gboolean

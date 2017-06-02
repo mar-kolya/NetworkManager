@@ -1,0 +1,77 @@
+From: Thomas Haller <thaller@redhat.com>
+Date: Thu, 1 Jun 2017 22:38:51 +0200
+Subject: device: handle unset ignore-carrier option depending on device
+
+Currently, device types like Bond hack around ignore-carrier
+setting, as they always want to ignore-carrier.
+
+Prepare so that also for such master types, we relying more on
+ignore-carrier. In the next commit they will get ignore-carrier
+turned on by default.
+---
+ src/devices/nm-device.c |  8 ++++++++
+ src/devices/nm-device.h |  2 ++
+ src/nm-config-data.c    | 11 +++++++++--
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
+index 84db684..0acf543 100644
+--- a/src/devices/nm-device.c
++++ b/src/devices/nm-device.c
+@@ -3745,6 +3745,14 @@ nm_device_is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+ }
+ 
+ gboolean
++nm_device_ignore_carrier_by_default (NMDevice *self)
++{
++	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
++
++	return FALSE;
++}
++
++gboolean
+ nm_device_get_enabled (NMDevice *self)
+ {
+ 	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
+diff --git a/src/devices/nm-device.h b/src/devices/nm-device.h
+index b5c933c..47b8f6f 100644
+--- a/src/devices/nm-device.h
++++ b/src/devices/nm-device.h
+@@ -484,6 +484,8 @@ NMSetting *     nm_device_get_applied_setting   (NMDevice *dev, GType setting_ty
+ 
+ void            nm_device_removed               (NMDevice *self, gboolean unconfigure_ip_config);
+ 
++gboolean        nm_device_ignore_carrier_by_default (NMDevice *self);
++
+ gboolean        nm_device_is_available          (NMDevice *dev, NMDeviceCheckDevAvailableFlags flags);
+ gboolean        nm_device_has_carrier           (NMDevice *dev);
+ 
+diff --git a/src/nm-config-data.c b/src/nm-config-data.c
+index 8f4d112..21ad1a7 100644
+--- a/src/nm-config-data.c
++++ b/src/nm-config-data.c
+@@ -304,15 +304,22 @@ nm_config_data_get_ignore_carrier (const NMConfigData *self, NMDevice *device)
+ {
+ 	gs_free char *value = NULL;
+ 	gboolean has_match;
++	int m;
+ 
+ 	g_return_val_if_fail (NM_IS_CONFIG_DATA (self), FALSE);
+ 	g_return_val_if_fail (NM_IS_DEVICE (device), FALSE);
+ 
+ 	value = nm_config_data_get_device_config (self, NM_CONFIG_KEYFILE_KEY_DEVICE_IGNORE_CARRIER, device, &has_match);
+ 	if (has_match)
+-		return nm_config_parse_boolean (value, FALSE);
++		m = nm_config_parse_boolean (value, -1);
++	else
++		m = nm_device_spec_match_list_full (device, NM_CONFIG_DATA_GET_PRIVATE (self)->ignore_carrier, -1);
+ 
+-	return nm_device_spec_match_list (device, NM_CONFIG_DATA_GET_PRIVATE (self)->ignore_carrier);
++	if (NM_IN_SET (m, TRUE, FALSE))
++		return m;
++
++	/* if ignore-carrier is not explicitly configed, then it depends on the device (type). */
++	return nm_device_ignore_carrier_by_default (device);
+ }
+ 
+ gboolean
