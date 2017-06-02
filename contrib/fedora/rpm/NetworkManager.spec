@@ -39,6 +39,8 @@
 
 %global snap %{?snapshot_dot}%{?git_sha_dot}
 
+%global is_devel_build %(printf '%s' '%{real_version}' | sed -n 's/^1\\.\\([0-9]*[13579]\\)\\..*/1/p')
+
 ###############################################################################
 
 %bcond_without adsl
@@ -49,8 +51,13 @@
 %bcond_without ppp
 %bcond_without nmtui
 %bcond_without regen_docs
+%if 0%{is_devel_build}
+%bcond_without debug
+%else
 %bcond_with    debug
+%endif
 %bcond_without test
+%bcond_with    sanitizer
 
 ###############################################################################
 
@@ -365,9 +372,19 @@ intltoolize --automake --copy --force
 	--with-dhcpcd=no \
 	--with-crypto=nss \
 	--enable-more-warnings=error \
+%if %{with sanitizer}
+	--enable-address-sanitizer \
+	--enable-undefined-sanitizer \
+%else
+	--disable-address-sanitizer \
+	--disable-undefined-sanitizer \
+%endif
 %if %{with debug}
-	--with-more-logging \
+	--enable-more-logging \
 	--with-more-asserts=10000 \
+%else
+	--disable-more-logging \
+	--without-more-asserts \
 %endif
 	--enable-ld-gc \
 	--with-libaudit=yes-disabled-by-default \
@@ -485,11 +502,11 @@ fi
 %systemd_postun
 
 
-%post	glib -p /sbin/ldconfig
-%postun	glib -p /sbin/ldconfig
+%post   glib -p /sbin/ldconfig
+%postun glib -p /sbin/ldconfig
 
-%post	libnm -p /sbin/ldconfig
-%postun	libnm -p /sbin/ldconfig
+%post   libnm -p /sbin/ldconfig
+%postun libnm -p /sbin/ldconfig
 
 
 %files

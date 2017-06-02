@@ -30,6 +30,9 @@
 #define SIGNAL_DATA_FMT "'%s-%s' ifindex %d%s%s%s (%d times received)"
 #define SIGNAL_DATA_ARG(data) (data)->name, nm_platform_signal_change_type_to_string ((data)->change_type), (data)->ifindex, (data)->ifname ? " ifname '" : "", (data)->ifname ? (data)->ifname : "", (data)->ifname ? "'" : "", (data)->received_count
 
+int NMTSTP_ENV1_IFINDEX = -1;
+int NMTSTP_ENV1_EX = -1;
+
 /*****************************************************************************/
 
 void
@@ -185,7 +188,7 @@ link_callback (NMPlatform *platform, int obj_type_i, int ifindex, NMPlatformLink
 
 	/* Check the data */
 	g_assert (received->ifindex > 0);
-	links = nm_platform_link_get_all (NM_PLATFORM_GET);
+	links = nm_platform_link_get_all (NM_PLATFORM_GET, TRUE);
 	for (i = 0; i < links->len; i++) {
 		cached = &g_array_index (links, NMPlatformLink, i);
 		if (cached->ifindex == received->ifindex) {
@@ -369,7 +372,7 @@ _wait_for_signal_timeout (gpointer user_data)
 }
 
 guint
-nmtstp_wait_for_signal (NMPlatform *platform, guint timeout_ms)
+nmtstp_wait_for_signal (NMPlatform *platform, gint64 timeout_ms)
 {
 	WaitForSignalData data = { 0 };
 	gulong id_link, id_ip4_address, id_ip6_address, id_ip4_route, id_ip6_route;
@@ -384,8 +387,18 @@ nmtstp_wait_for_signal (NMPlatform *platform, guint timeout_ms)
 	id_ip4_route   = g_signal_connect (platform, NM_PLATFORM_SIGNAL_IP4_ROUTE_CHANGED, G_CALLBACK (_wait_for_signal_cb), &data);
 	id_ip6_route   = g_signal_connect (platform, NM_PLATFORM_SIGNAL_IP6_ROUTE_CHANGED, G_CALLBACK (_wait_for_signal_cb), &data);
 
-	if (timeout_ms != 0)
-		data.id = g_timeout_add (timeout_ms, _wait_for_signal_timeout, &data);
+	/* if timeout_ms is negative, it means the wait-time already expired.
+	 * Maybe, we should do nothing and return right away, without even
+	 * processing events from platform. However, that inconsistency (of not
+	 * processing events from mainloop) is inconvenient.
+	 *
+	 * It's better that on the return of nmtstp_wait_for_signal(), we always
+	 * have no events pending. So, a negative timeout is treated the same as
+	 * a zero timeout: we check whether there are any events pending in platform,
+	 * and quite the mainloop immediately afterwards. But we always check. */
+
+	data.id = g_timeout_add (CLAMP (timeout_ms, 0, G_MAXUINT32),
+	                         _wait_for_signal_timeout, &data);
 
 	g_main_loop_run (data.loop);
 
@@ -414,14 +427,14 @@ nmtstp_wait_for_signal_until (NMPlatform *platform, gint64 until_ms)
 		if (until_ms < now)
 			return 0;
 
-		signal_counts = nmtstp_wait_for_signal (platform, MAX (1, until_ms - now));
+		signal_counts = nmtstp_wait_for_signal (platform, until_ms - now);
 		if (signal_counts)
 			return signal_counts;
 	}
 }
 
 const NMPlatformLink *
-nmtstp_wait_for_link (NMPlatform *platform, const char *ifname, NMLinkType expected_link_type, guint timeout_ms)
+nmtstp_wait_for_link (NMPlatform *platform, const char *ifname, NMLinkType expected_link_type, gint64 timeout_ms)
 {
 	return nmtstp_wait_for_link_until (platform, ifname, expected_link_type, nm_utils_get_monotonic_timestamp_ms () + timeout_ms);
 }
@@ -445,7 +458,7 @@ nmtstp_wait_for_link_until (NMPlatform *platform, const char *ifname, NMLinkType
 		if (until_ms < now)
 			return NULL;
 
-		nmtstp_wait_for_signal (platform, MAX (1, until_ms - now));
+		nmtstp_wait_for_signal (platform, until_ms - now);
 	}
 }
 
@@ -717,7 +730,7 @@ _ip_address_add (NMPlatform *platform,
 			g_assert (label == NULL);
 			g_assert (flags == 0);
 
-			a = nm_platform_ip6_address_get (platform, ifindex, address->addr6, plen);
+			a = nm_platform_ip6_address_get (platform, ifindex, address->addr6);
 			if (   a
 			    && !memcmp (nm_platform_ip6_address_get_peer (a),
 			                (IN6_IS_ADDR_UNSPECIFIED (&peer_address->addr6) || IN6_ARE_ADDR_EQUAL (&address->addr6, &peer_address->addr6))
@@ -861,7 +874,7 @@ _ip_address_del (NMPlatform *platform,
 		if (is_v4)
 			had_address = !!nm_platform_ip4_address_get (platform, ifindex, address->addr4, plen, peer_address->addr4);
 		else
-			had_address = !!nm_platform_ip6_address_get (platform, ifindex, address->addr6, plen);
+			had_address = !!nm_platform_ip6_address_get (platform, ifindex, address->addr6);
 
 		if (is_v4) {
 			success = nmtstp_run_command ("ip address delete %s%s%s/%d dev %s",
@@ -913,7 +926,7 @@ _ip_address_del (NMPlatform *platform,
 		} else {
 			const NMPlatformIP6Address *a;
 
-			a = nm_platform_ip6_address_get (platform, ifindex, address->addr6, plen);
+			a = nm_platform_ip6_address_get (platform, ifindex, address->addr6);
 			if (!a)
 				break;
 		}
@@ -972,6 +985,36 @@ nmtstp_ip6_address_del (NMPlatform *platform,
 			g_assert (!nmtstp_link_get (platform, 0, (name))); \
 		} \
 	} G_STMT_END
+
+const NMPlatformLink *
+nmtstp_link_veth_add (NMPlatform *platform,
+                      gboolean external_command,
+                      const char *name,
+                      const char *peer)
+{
+	const NMPlatformLink *pllink = NULL;
+	gboolean success;
+
+	g_assert (nm_utils_is_valid_iface_name (name, NULL));
+
+	external_command = nmtstp_run_command_check_external (external_command);
+
+	_init_platform (&platform, external_command);
+
+	if (external_command) {
+		success = !nmtstp_run_command ("ip link add dev %s type veth peer name %s",
+		                                name, peer);
+		if (success) {
+			pllink = nmtstp_assert_wait_for_link (platform, name, NM_LINK_TYPE_VETH, 100);
+			nmtstp_assert_wait_for_link (platform, peer, NM_LINK_TYPE_VETH, 10);
+		}
+	} else
+		success = nm_platform_link_veth_add (platform, name, peer, &pllink) == NM_PLATFORM_ERROR_SUCCESS;
+
+	g_assert (success);
+	_assert_pllink (platform, success, pllink, name, NM_LINK_TYPE_VETH);
+	return pllink;
+}
 
 const NMPlatformLink *
 nmtstp_link_dummy_add (NMPlatform *platform,

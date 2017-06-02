@@ -437,7 +437,8 @@ nm_platform_sysctl_get_int_checked (NMPlatform *self, const char *pathid, int di
 
 static int
 _link_get_all_presort (gconstpointer  p_a,
-                       gconstpointer  p_b)
+                       gconstpointer  p_b,
+                       gpointer       sort_by_name)
 {
 	const NMPlatformLink *a = p_a;
 	const NMPlatformLink *b = p_b;
@@ -448,13 +449,16 @@ _link_get_all_presort (gconstpointer  p_a,
 	if (b->ifindex == 1)
 		return 1;
 
-	/* Initialized links first */
-	if (a->initialized > b->initialized)
-		return -1;
-	if (a->initialized < b->initialized)
-		return 1;
+	if (GPOINTER_TO_INT (sort_by_name)) {
+		/* Initialized links first */
+		if (a->initialized > b->initialized)
+			return -1;
+		if (a->initialized < b->initialized)
+			return 1;
 
-	return strcmp (a->name, b->name);
+		return strcmp (a->name, b->name);
+	} else
+		return a->ifindex - b->ifindex;
 }
 
 /**
@@ -465,7 +469,7 @@ _link_get_all_presort (gconstpointer  p_a,
  * owned by the caller and should be freed with g_array_unref().
  */
 GArray *
-nm_platform_link_get_all (NMPlatform *self)
+nm_platform_link_get_all (NMPlatform *self, gboolean sort_by_name)
 {
 	GArray *links, *result;
 	guint i, j, nresult;
@@ -479,9 +483,9 @@ nm_platform_link_get_all (NMPlatform *self)
 	if (!links || links->len == 0)
 		return links;
 
-	/* first sort the links by their ifindex. Below we will sort further by moving
-	 * children/slaves to the end. */
-	g_array_sort (links, _link_get_all_presort);
+	/* first sort the links by their ifindex or name. Below we will sort
+	 * further by moving children/slaves to the end. */
+	g_array_sort_with_data (links, _link_get_all_presort, GINT_TO_POINTER (sort_by_name));
 
 	unseen = g_hash_table_new (g_direct_hash, g_direct_equal);
 	for (i = 0; i < links->len; i++) {
@@ -658,6 +662,7 @@ _link_add_check_existing (NMPlatform *self, const char *name, NMLinkType type, c
  * @self: platform instance
  * @name: Interface name
  * @type: Interface type
+ * @veth_peer: For veths, the peer name
  * @address: (allow-none): set the mac address of the link
  * @address_len: the length of the @address
  * @out_link: on success, the link object
@@ -676,6 +681,7 @@ static NMPlatformError
 nm_platform_link_add (NMPlatform *self,
                       const char *name,
                       NMLinkType type,
+                      const char *veth_peer,
                       const void *address,
                       size_t address_len,
                       const NMPlatformLink **out_link)
@@ -686,15 +692,25 @@ nm_platform_link_add (NMPlatform *self,
 
 	g_return_val_if_fail (name, NM_PLATFORM_ERROR_BUG);
 	g_return_val_if_fail ( (address != NULL) ^ (address_len == 0) , NM_PLATFORM_ERROR_BUG);
+	g_return_val_if_fail ((!!veth_peer) == (type == NM_LINK_TYPE_VETH), NM_PLATFORM_ERROR_BUG);
 
 	plerr = _link_add_check_existing (self, name, type, out_link);
 	if (plerr != NM_PLATFORM_ERROR_SUCCESS)
 		return plerr;
 
 	_LOGD ("link: adding %s '%s'", nm_link_type_to_string (type), name);
-	if (!klass->link_add (self, name, type, address, address_len, out_link))
+	if (!klass->link_add (self, name, type, veth_peer, address, address_len, out_link))
 		return NM_PLATFORM_ERROR_UNSPECIFIED;
 	return NM_PLATFORM_ERROR_SUCCESS;
+}
+
+NMPlatformError
+nm_platform_link_veth_add (NMPlatform *self,
+                            const char *name,
+                            const char *peer,
+                            const NMPlatformLink **out_link)
+{
+	return nm_platform_link_add (self, name, NM_LINK_TYPE_VETH, peer, NULL, 0, out_link);
 }
 
 /**
@@ -710,7 +726,7 @@ nm_platform_link_dummy_add (NMPlatform *self,
                             const char *name,
                             const NMPlatformLink **out_link)
 {
-	return nm_platform_link_add (self, name, NM_LINK_TYPE_DUMMY, NULL, 0, out_link);
+	return nm_platform_link_add (self, name, NM_LINK_TYPE_DUMMY, NULL, NULL, 0, out_link);
 }
 
 /**
@@ -1612,7 +1628,7 @@ nm_platform_link_bridge_add (NMPlatform *self,
                              size_t address_len,
                              const NMPlatformLink **out_link)
 {
-	return nm_platform_link_add (self, name, NM_LINK_TYPE_BRIDGE, address, address_len, out_link);
+	return nm_platform_link_add (self, name, NM_LINK_TYPE_BRIDGE, NULL, address, address_len, out_link);
 }
 
 /**
@@ -1628,7 +1644,7 @@ nm_platform_link_bond_add (NMPlatform *self,
                            const char *name,
                            const NMPlatformLink **out_link)
 {
-	return nm_platform_link_add (self, name, NM_LINK_TYPE_BOND, NULL, 0, out_link);
+	return nm_platform_link_add (self, name, NM_LINK_TYPE_BOND, NULL, NULL, 0, out_link);
 }
 
 /**
@@ -1644,7 +1660,7 @@ nm_platform_link_team_add (NMPlatform *self,
                            const char *name,
                            const NMPlatformLink **out_link)
 {
-	return nm_platform_link_add (self, name, NM_LINK_TYPE_TEAM, NULL, 0, out_link);
+	return nm_platform_link_add (self, name, NM_LINK_TYPE_TEAM, NULL, NULL, 0, out_link);
 }
 
 /**
@@ -2772,13 +2788,11 @@ nm_platform_ip4_address_get (NMPlatform *self, int ifindex, in_addr_t address, g
 }
 
 const NMPlatformIP6Address *
-nm_platform_ip6_address_get (NMPlatform *self, int ifindex, struct in6_addr address, guint8 plen)
+nm_platform_ip6_address_get (NMPlatform *self, int ifindex, struct in6_addr address)
 {
 	_CHECK_SELF (self, klass, NULL);
 
-	g_return_val_if_fail (plen <= 128, NULL);
-
-	return klass->ip6_address_get (self, ifindex, address, plen);
+	return klass->ip6_address_get (self, ifindex, address);
 }
 
 static const NMPlatformIP4Address *

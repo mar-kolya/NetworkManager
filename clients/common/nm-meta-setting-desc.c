@@ -34,9 +34,6 @@
 
 /*****************************************************************************/
 
-static gboolean validate_int (NMSetting *setting, const char* prop, gint val, GError **error);
-static gboolean validate_uint (NMSetting *setting, const char* prop, guint val, GError **error);
-static gboolean validate_int64 (NMSetting *setting, const char* prop, gint64 val, GError **error);
 static char *secret_flags_to_string (guint32 flags, NMMetaAccessorGetType get_type);
 
 #define ALL_SECRET_FLAGS \
@@ -78,125 +75,105 @@ _gtype_property_get_gtype (GType gtype, const char *property_name)
 
 /*****************************************************************************/
 
-/*
- * Parse IP address from string to NMIPAddress stucture.
- * ip_str is the IP address in the form address/prefix
- */
 static NMIPAddress *
-nmc_parse_and_build_address (int family, const char *ip_str, GError **error)
+_parse_ip_address (int family, const char *address, GError **error)
 {
-	int max_prefix = (family == AF_INET) ? 32 : 128;
-	NMIPAddress *addr = NULL;
-	const char *ip;
-	char *tmp;
+	gs_free char *ip_str = NULL;
+	const int MAX_PREFIX = (family == AF_INET) ? 32 : 128;
+	NMIPAddress *addr;
 	char *plen;
-	long int prefix;
+	int prefix;
 	GError *local = NULL;
 
-	g_return_val_if_fail (ip_str != NULL, NULL);
-	g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+	g_return_val_if_fail (address, NULL);
+	g_return_val_if_fail (!error || !*error, NULL);
 
-	tmp = g_strdup (ip_str);
-	plen = strchr (tmp, '/');  /* prefix delimiter */
-	if (plen)
-		*plen++ = '\0';
+	ip_str = g_strstrip (g_strdup (address));
 
-	ip = tmp;
+	prefix = MAX_PREFIX;
 
-	prefix = max_prefix;
+	plen = strchr (ip_str, '/');
 	if (plen) {
-		if (!nmc_string_to_int (plen, TRUE, 1, max_prefix, &prefix)) {
+		*plen++ = '\0';
+		if ((prefix = _nm_utils_ascii_str_to_int64 (plen, 10, 1, MAX_PREFIX, -1)) == -1) {
 			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
-			             _("invalid prefix '%s'; <1-%d> allowed"), plen, max_prefix);
-			goto finish;
+			             _("invalid prefix '%s'; <1-%d> allowed"), plen, MAX_PREFIX);
+			return NULL;
 		}
 	}
 
-	addr = nm_ip_address_new (family, ip, (guint32) prefix, &local);
+	addr = nm_ip_address_new (family, ip_str, prefix, &local);
 	if (!addr) {
 		g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
 		             _("invalid IP address: %s"), local->message);
 		g_clear_error (&local);
 	}
-
-finish:
-	g_free (tmp);
 	return addr;
 }
 
-/*
- * nmc_parse_and_build_route:
- * @family: AF_INET or AF_INET6
- * @str: route string to be parsed
- * @error: location to store GError
- *
- * Parse route from string and return an #NMIPRoute
- *
- * Returns: a new #NMIPRoute or %NULL on error
- */
 static NMIPRoute *
-nmc_parse_and_build_route (int family,
-                           const char *str,
-                           GError **error)
+_parse_ip_route (int family,
+                 const char *str,
+                 GError **error)
 {
-	int max_prefix = (family == AF_INET) ? 32 : 128;
+	const int MAX_PREFIX = (family == AF_INET) ? 32 : 128;
 	char *plen = NULL;
 	const char *next_hop = NULL;
 	const char *canon_dest;
-	long int prefix = max_prefix;
-	unsigned long int tmp_ulong;
+	int prefix;
 	NMIPRoute *route = NULL;
-	gboolean success = FALSE;
 	GError *local = NULL;
 	gint64 metric = -1;
-	guint i, len;
+	guint i;
 	gs_strfreev char **routev = NULL;
-	gs_free char *value = NULL;
-	gs_free char *dest = NULL;
+	gs_free char *str_clean = NULL;
+	char *dest;
 	gs_unref_hashtable GHashTable *attrs = NULL;
 	GHashTable *tmp_attrs;
-	const char *syntax = _("The valid syntax is: 'ip[/prefix] [next-hop] [metric] [attribute=val]... [,ip[/prefix] ...]'");
+#define ROUTE_SYNTAX _("The valid syntax is: 'ip[/prefix] [next-hop] [metric] [attribute=val]... [,ip[/prefix] ...]'")
 
-	g_return_val_if_fail (family == AF_INET || family == AF_INET6, FALSE);
-	g_return_val_if_fail (str, FALSE);
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+	nm_assert (NM_IN_SET (family, AF_INET, AF_INET6));
+	nm_assert (str);
+	nm_assert (!error || !*error);
 
-	value = g_strdup (str);
-	routev = nmc_strsplit_set (g_strstrip (value), " \t", 0);
-	len = g_strv_length (routev);
-	if (len < 1) {
-		g_set_error (error, 1, 0, "%s", syntax);
-		g_prefix_error (error, "'%s' is not valid. ", str);
-		goto finish;
+	str_clean = g_strstrip (g_strdup (str));
+	routev = nmc_strsplit_set (str_clean, " \t", 0);
+	if (!routev || !routev[0]) {
+		g_set_error (error, 1, 0,
+		             "'%s' is not valid. %s",
+		             str, ROUTE_SYNTAX);
+		return NULL;
 	}
 
-	dest = g_strdup (routev[0]);
+	dest = routev[0];
 	plen = strchr (dest, '/');  /* prefix delimiter */
 	if (plen)
 		*plen++ = '\0';
-
+	prefix = MAX_PREFIX;
 	if (plen) {
-		if (!nmc_string_to_int (plen, TRUE, 1, max_prefix, &prefix)) {
+		if ((prefix = _nm_utils_ascii_str_to_int64 (plen, 10, 1, MAX_PREFIX, -1)) == -1) {
 			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
 			             _("invalid prefix '%s'; <1-%d> allowed"),
-			             plen, max_prefix);
-			goto finish;
+			             plen, MAX_PREFIX);
+			return NULL;
 		}
 	}
 
-	for (i = 1; i < len; i++) {
+	for (i = 1; routev[i]; i++) {
+		gint64 tmp64;
+
 		if (nm_utils_ipaddr_valid (family, routev[i])) {
 			if (metric != -1 || attrs) {
 				g_set_error (error, 1, 0, _("the next hop ('%s') must be first"), routev[i]);
-				goto finish;
+				return NULL;
 			}
 			next_hop = routev[i];
-		} else if (nmc_string_to_uint (routev[i], TRUE, 0, G_MAXUINT32, &tmp_ulong)) {
+		} else if ((tmp64 = _nm_utils_ascii_str_to_int64 (routev[i], 10, 0, G_MAXUINT32, -1)) != -1) {
 			if (attrs) {
 				g_set_error (error, 1, 0, _("the metric ('%s') must be before attributes"), routev[i]);
-				goto finish;
+				return NULL;
 			}
-			metric = tmp_ulong;
+			metric = tmp64;
 		} else if (strchr (routev[i], '=')) {
 			GHashTableIter iter;
 			char *iter_key;
@@ -207,7 +184,7 @@ nmc_parse_and_build_route (int family,
 			                                               error);
 			if (!tmp_attrs) {
 				g_prefix_error (error, "invalid option '%s': ", routev[i]);
-				goto finish;
+				return NULL;
 			}
 
 			if (!attrs)
@@ -218,24 +195,24 @@ nmc_parse_and_build_route (int family,
 				if (!nm_ip_route_attribute_validate (iter_key, iter_value, family, NULL, error)) {
 					g_prefix_error (error, "%s: ", iter_key);
 					g_hash_table_unref (tmp_attrs);
-					goto finish;
+					return NULL;
 				}
 				g_hash_table_insert (attrs, iter_key, iter_value);
 				g_hash_table_iter_steal (&iter);
 			}
 			g_hash_table_unref (tmp_attrs);
 		} else {
-			g_set_error (error, 1, 0, "%s", syntax);
-			goto finish;
+			g_set_error (error, 1, 0, "%s", ROUTE_SYNTAX);
+			return NULL;
 		}
 	}
 
 	route = nm_ip_route_new (family, dest, prefix, next_hop, metric, &local);
 	if (!route) {
-		g_set_error (error, 1, 0, "%s", syntax);
-		g_prefix_error (error, _("invalid route: %s. "), local->message);
+		g_set_error (error, 1, 0,
+		             _("invalid route: %s. %s"), local->message, ROUTE_SYNTAX);
 		g_clear_error (&local);
-		goto finish;
+		return NULL;
 	}
 
 	/* We don't accept default routes as NetworkManager handles it
@@ -247,7 +224,7 @@ nmc_parse_and_build_route (int family,
 		g_set_error_literal (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
 		                     _("default route cannot be added (NetworkManager handles it by itself)"));
 		g_clear_pointer (&route, nm_ip_route_unref);
-		goto finish;
+		return NULL;
 	}
 
 	if (attrs) {
@@ -260,9 +237,6 @@ nmc_parse_and_build_route (int family,
 			nm_ip_route_set_attribute (route, name, variant);
 	}
 
-	success = TRUE;
-
-finish:
 	return route;
 }
 
@@ -278,9 +252,9 @@ finish:
  * Caller is responsible for freeing the array.
  */
 static char **
-nmc_vlan_parse_priority_maps (const char *priority_map,
-                              NMVlanPriorityMap map_type,
-                              GError **error)
+_parse_vlan_priority_maps (const char *priority_map,
+                           NMVlanPriorityMap map_type,
+                           GError **error)
 {
 	char **mapping = NULL, **iter;
 	unsigned long from, to, from_max, to_max;
@@ -616,6 +590,78 @@ _get_fcn_gobject (ARGS_GET_FCN)
 }
 
 static gconstpointer
+_get_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
+                           NMSetting *setting,
+                           NMMetaAccessorGetType get_type,
+                           const NMMetaUtilsIntValueInfo *value_infos,
+                           gpointer *out_to_free)
+{
+	const GParamSpec *pspec;
+	nm_auto_unset_gvalue GValue gval = G_VALUE_INIT;
+	gint64 v;
+
+	RETURN_UNSUPPORTED_GET_TYPE ();
+
+	pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (G_OBJECT (setting)), property_info->property_name);
+	if (!G_IS_PARAM_SPEC (pspec))
+		g_return_val_if_reached (FALSE);
+
+	g_value_init (&gval, pspec->value_type);
+	g_object_get_property (G_OBJECT (setting), property_info->property_name, &gval);
+	switch (pspec->value_type) {
+	case G_TYPE_INT:
+		v = g_value_get_int (&gval);
+		break;
+	case G_TYPE_UINT:
+		v = g_value_get_uint (&gval);
+		break;
+	case G_TYPE_INT64:
+		v = g_value_get_int64 (&gval);
+		break;
+	default:
+		g_return_val_if_reached (NULL);
+		break;
+	}
+
+	if (   get_type == NM_META_ACCESSOR_GET_TYPE_PRETTY
+	    && value_infos) {
+		for (; value_infos->nick; value_infos++) {
+			if (value_infos->value == v) {
+				RETURN_STR_TO_FREE (g_strdup_printf ("%lli (%s)",
+				                                     (long long) v,
+				                                     value_infos->nick));
+			}
+		}
+	}
+
+	RETURN_STR_TO_FREE (g_strdup_printf ("%"G_GINT64_FORMAT, v));
+}
+
+static gconstpointer
+_get_fcn_gobject_int (ARGS_GET_FCN)
+{
+	return _get_fcn_gobject_int_impl (property_info, setting, get_type,
+	                                  property_info->property_typ_data
+	                                      ? property_info->property_typ_data->subtype.gobject_int.value_infos
+	                                      : NULL,
+	                                  out_to_free);
+}
+
+static gconstpointer
+_get_fcn_gobject_dcb_priority (ARGS_GET_FCN)
+{
+	static const NMMetaUtilsIntValueInfo value_infos[] = {
+		{
+			.value = -1,
+			.nick = "unset",
+		},
+		{ 0 },
+	};
+
+	return _get_fcn_gobject_int_impl (property_info, setting, get_type, value_infos, out_to_free);
+}
+
+static gconstpointer
 _get_fcn_gobject_mtu (ARGS_GET_FCN)
 {
 	guint32 mtu;
@@ -787,13 +833,20 @@ _get_fcn_gobject_enum (ARGS_GET_FCN)
 static gboolean
 _set_fcn_gobject_string (ARGS_SET_FCN)
 {
-	if (   property_info->property_typ_data
-	    && property_info->property_typ_data->values_static) {
-		value = nmc_string_is_valid (value,
-		                             (const char **) property_info->property_typ_data->values_static,
-		                             error);
-		if (!value)
-			return FALSE;
+	gs_free char *to_free = NULL;
+
+	if (property_info->property_typ_data) {
+		if (property_info->property_typ_data->subtype.gobject_string.validate_fcn) {
+			value = property_info->property_typ_data->subtype.gobject_string.validate_fcn (value, &to_free, error);
+			if (!value)
+				return FALSE;
+		} else if (property_info->property_typ_data->values_static) {
+			value = nmc_string_is_valid (value,
+			                             (const char **) property_info->property_typ_data->values_static,
+			                             error);
+			if (!value)
+				return FALSE;
+		}
 	}
 	g_object_set (setting, property_info->property_name, value, NULL);
 	return TRUE;
@@ -812,94 +865,166 @@ _set_fcn_gobject_bool (ARGS_SET_FCN)
 }
 
 static gboolean
-_set_fcn_gobject_trilean (ARGS_SET_FCN)
+_set_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
+                           NMSetting *setting,
+                           const char *value,
+                           GError **error)
 {
-	long int val_int;
+	int errsv;
+	const GParamSpec *pspec;
+	nm_auto_unset_gvalue GValue gval = G_VALUE_INIT;
+	gint64 v = 0;
+	gboolean has_minmax = FALSE;
+	gint64 min = G_MININT64;
+	gint64 max = G_MAXINT64;
+	guint base = 10;
+	const NMMetaUtilsIntValueInfo *value_infos = NULL;
+	gboolean has_value = FALSE;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+	if (property_info->property_typ_data) {
 
-	if (!nmc_string_to_int (value, TRUE, -1, 1, &val_int)) {
-		g_set_error (error, 1, 0, _("'%s' is not a valid value; use -1, 0 or 1"), value);
+		if (   value
+		    && (value_infos = property_info->property_typ_data->subtype.gobject_int.value_infos)) {
+			gs_free char *vv_stripped = NULL;
+			const char *vv = nm_str_skip_leading_spaces (value);
+
+			if (vv[0] && g_ascii_isspace (vv[strlen (vv) - 1])) {
+				vv_stripped = g_strstrip (g_strdup (vv));
+				vv = vv_stripped;
+			}
+
+			for (; value_infos->nick; value_infos++) {
+				if (nm_streq (value_infos->nick, vv)) {
+					v = value_infos->value;
+					has_value = TRUE;
+					break;
+				}
+			}
+		}
+
+		if (property_info->property_typ_data->subtype.gobject_int.base > 0)
+			base = property_info->property_typ_data->subtype.gobject_int.base;
+		if (   property_info->property_typ_data->subtype.gobject_int.min
+		    || property_info->property_typ_data->subtype.gobject_int.max) {
+			min = property_info->property_typ_data->subtype.gobject_int.min;
+			max = property_info->property_typ_data->subtype.gobject_int.max;
+			has_minmax = TRUE;
+		}
+	}
+
+	pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (G_OBJECT (setting)), property_info->property_name);
+	if (!G_IS_PARAM_SPEC (pspec))
+		g_return_val_if_reached (FALSE);
+	switch (pspec->value_type) {
+	case G_TYPE_INT:
+		if (!has_minmax) {
+			const GParamSpecInt *p = (GParamSpecInt *) pspec;
+
+			min = p->minimum;
+			max = p->maximum;
+		}
+		break;
+	case G_TYPE_UINT:
+		if (!has_minmax) {
+			const GParamSpecUInt *p = (GParamSpecUInt *) pspec;
+
+			min = p->minimum;
+			max = p->maximum;
+		}
+		break;
+	case G_TYPE_INT64:
+		if (!has_minmax) {
+			const GParamSpecInt64 *p = (GParamSpecInt64 *) pspec;
+
+			min = p->minimum;
+			max = p->maximum;
+		}
+		break;
+	default:
+		g_return_val_if_reached (FALSE);
+	}
+
+	if (!has_value)
+		v = _nm_utils_ascii_str_to_int64 (value, base, min, max, 0);
+
+	if ((errsv = errno) != 0) {
+		if (errsv == ERANGE) {
+			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+			             _("'%s' is out of range [%lli, %lli]"),
+			             value,
+			             (long long) min,
+			             (long long) max);
+		} else {
+			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+			             _("'%s' is not a valid number"), value);
+		}
 		return FALSE;
 	}
 
-	g_object_set (setting, property_info->property_name, val_int, NULL);
+	g_value_init (&gval, pspec->value_type);
+	switch (pspec->value_type) {
+	case G_TYPE_INT:
+		g_value_set_int (&gval, v);
+		break;
+	case G_TYPE_UINT:
+		g_value_set_uint (&gval, v);
+		break;
+	case G_TYPE_INT64:
+		g_value_set_int64 (&gval, v);
+		break;
+	default:
+		nm_assert_not_reached ();
+		break;
+	}
+
+	/* Validate the number according to the property spec */
+	if (!nm_g_object_set_property (G_OBJECT (setting),
+	                               property_info->property_name,
+	                               &gval,
+	                               error))
+		g_return_val_if_reached (FALSE);
+
 	return TRUE;
 }
 
 static gboolean
 _set_fcn_gobject_int (ARGS_SET_FCN)
 {
-	long int val_int;
-
-	if (!nmc_string_to_int (value, TRUE, G_MININT, G_MAXINT, &val_int)) {
-		g_set_error (error, 1, 0, _("'%s' is not a valid number (or out of range)"), value);
-		return FALSE;
-	}
-
-	/* Validate the number according to the property spec */
-	if (!validate_int (setting, property_info->property_name, (gint) val_int, error))
-		return FALSE;
-
-	g_object_set (setting, property_info->property_name, (gint) val_int, NULL);
-	return TRUE;
-}
-
-static gboolean
-_set_fcn_gobject_int64 (ARGS_SET_FCN)
-{
-	long val_int;
-
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-	if (!nmc_string_to_int (value, FALSE, 0, 0, &val_int)) {
-		g_set_error (error, 1, 0, _("'%s' is not a valid number (or out of range)"), value);
-		return FALSE;
-	}
-
-	/* Validate the number according to the property spec */
-	if (!validate_int64 (setting, property_info->property_name, (gint64) val_int, error))
-		return FALSE;
-
-	g_object_set (setting, property_info->property_name, (gint64) val_int, NULL);
-	return TRUE;
-}
-
-static gboolean
-_set_fcn_gobject_uint_impl (const NMMetaPropertyInfo *property_info,
-                            NMSetting *setting,
-                            const char *value,
-                            GError **error)
-{
-	unsigned long val_int;
-
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-	if (!nmc_string_to_uint (value, TRUE, 0, G_MAXUINT, &val_int)) {
-		g_set_error (error, 1, 0, _("'%s' is not a valid number (or out of range)"), value);
-		return FALSE;
-	}
-
-	/* Validate the number according to the property spec */
-	if (!validate_uint (setting, property_info->property_name, (guint) val_int, error))
-		return FALSE;
-
-	g_object_set (setting, property_info->property_name, (guint) val_int, NULL);
-	return TRUE;
-}
-
-static gboolean
-_set_fcn_gobject_uint (ARGS_SET_FCN)
-{
-	return _set_fcn_gobject_uint_impl (property_info, setting, value, error);
+	return _set_fcn_gobject_int_impl (property_info, setting, value, error);
 }
 
 static gboolean
 _set_fcn_gobject_mtu (ARGS_SET_FCN)
 {
+	nm_auto_unset_gvalue GValue gval = G_VALUE_INIT;
+	const GParamSpec *pspec;
+	gint64 v;
+
 	if (nm_streq0 (value, "auto"))
 		value = "0";
-	return _set_fcn_gobject_uint_impl (property_info, setting, value, error);
+
+	pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (G_OBJECT (setting)),
+	                                      property_info->property_name);
+	if (!pspec || pspec->value_type != G_TYPE_UINT)
+		g_return_val_if_reached (FALSE);
+
+	v = _nm_utils_ascii_str_to_int64 (value, 10, 0, G_MAXUINT32, -1);
+	if (v < 0) {
+		g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+		             _("'%s' is out of range [0, %u]"), value, (unsigned) G_MAXUINT32);
+		return FALSE;
+	}
+
+	g_value_init (&gval, pspec->value_type);
+	g_value_set_uint (&gval, v);
+
+	if (!nm_g_object_set_property (G_OBJECT (setting),
+	                               property_info->property_name,
+	                               &gval,
+	                               error))
+		g_return_val_if_reached (FALSE);
+
+	return TRUE;
 }
 
 static gboolean
@@ -972,6 +1097,7 @@ _set_fcn_gobject_enum (ARGS_SET_FCN)
 	gboolean has_gtype = FALSE;
 	nm_auto_unset_gvalue GValue gval = G_VALUE_INIT;
 	nm_auto_unref_gtypeclass GTypeClass *gtype_class = NULL;
+	gboolean is_flags;
 	int v;
 
 	if (property_info->property_typ_data) {
@@ -983,26 +1109,38 @@ _set_fcn_gobject_enum (ARGS_SET_FCN)
 
 	gtype_prop = _gobject_property_get_gtype (G_OBJECT (setting), property_info->property_name);
 
-	if (   gtype_prop == G_TYPE_INT
-	    || gtype_prop == G_TYPE_UINT) {
-		if (!has_gtype)
-			g_return_val_if_reached (FALSE);
-	} else if (G_TYPE_IS_CLASSED (gtype_prop)) {
-		gtype_class = g_type_class_ref (gtype_prop);
-		if (   !G_IS_ENUM_CLASS (gtype_class)
-		    && !G_IS_FLAGS_CLASS (gtype_class))
-			g_return_val_if_reached (FALSE);
+	if (   has_gtype
+	    && NM_IN_SET (gtype_prop,
+	                  G_TYPE_INT,
+	                  G_TYPE_UINT)
+	    && G_TYPE_IS_CLASSED (gtype)
+	    && (gtype_class = g_type_class_ref (gtype))
+	    && (   (is_flags = G_IS_FLAGS_CLASS (gtype_class))
+	        || G_IS_ENUM_CLASS (gtype_class))) {
+		/* valid */
+	} else if (   !has_gtype
+	           && G_TYPE_IS_CLASSED (gtype_prop)
+	           && (gtype_class = g_type_class_ref (gtype_prop))
+	           && (   (is_flags = G_IS_FLAGS_CLASS (gtype_class))
+	               || G_IS_ENUM_CLASS (gtype_class))) {
+		gtype = gtype_prop;
 	} else
 		g_return_val_if_reached (FALSE);
-
-	if (!has_gtype)
-		gtype = gtype_prop;
 
 	if (!_nm_utils_enum_from_str_full (gtype, value, &v, NULL,
 	                                   property_info->property_typ_data
 	                                       ? property_info->property_typ_data->subtype.gobject_enum.value_infos
 	                                       : NULL))
 		goto fail;
+
+	if (   property_info->property_typ_data
+	    && property_info->property_typ_data->subtype.gobject_enum.pre_set_notify) {
+		property_info->property_typ_data->subtype.gobject_enum.pre_set_notify (property_info,
+		                                                                       environment,
+		                                                                       environment_user_data,
+		                                                                       setting,
+		                                                                       v);
+	}
 
 	g_value_init (&gval, gtype_prop);
 	if (gtype_prop == G_TYPE_INT)
@@ -1025,6 +1163,7 @@ fail:
 	if (error) {
 		gs_free const char **valid_all = NULL;
 		gs_free const char *valid_str = NULL;
+		gboolean has_minmax = FALSE;
 		int min = G_MININT;
 		int max = G_MAXINT;
 
@@ -1033,14 +1172,28 @@ fail:
 			    || property_info->property_typ_data->subtype.gobject_enum.max) {
 				min = property_info->property_typ_data->subtype.gobject_enum.min;
 				max = property_info->property_typ_data->subtype.gobject_enum.max;
+				has_minmax = TRUE;
 			}
 		}
+
+		if (!has_minmax && is_flags) {
+			min = 0;
+			max = (gint) G_MAXUINT;
+		}
+
 		valid_all = nm_utils_enum_get_values (gtype, min, max);
 		valid_str = g_strjoinv (",", (char **) valid_all);
-		g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
-		             _("invalid option '%s', use one of [%s]"),
-		             value,
-		             valid_str);
+		if (is_flags) {
+			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+			             _("invalid option '%s', use a combination of [%s]"),
+			             value,
+			             valid_str);
+		} else {
+			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+			             _("invalid option '%s', use one of [%s]"),
+			             value,
+			             valid_str);
+		}
 	}
 	return FALSE;
 }
@@ -1259,24 +1412,6 @@ ip6_privacy_to_string (NMSettingIP6ConfigPrivacy ip6_privacy, NMMetaAccessorGetT
 }
 
 static char *
-autoconnect_slaves_to_string (NMSettingConnectionAutoconnectSlaves autoconnect_slaves,
-                              NMMetaAccessorGetType get_type)
-{
-	if (get_type != NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		return g_strdup_printf ("%d", autoconnect_slaves);
-
-	switch (autoconnect_slaves) {
-	case NM_SETTING_CONNECTION_AUTOCONNECT_SLAVES_NO:
-		return g_strdup_printf (_("%d (no)"), autoconnect_slaves);
-	case NM_SETTING_CONNECTION_AUTOCONNECT_SLAVES_YES:
-		return g_strdup_printf (_("%d (yes)"), autoconnect_slaves);
-	case NM_SETTING_CONNECTION_AUTOCONNECT_SLAVES_DEFAULT:
-	default:
-		return g_strdup_printf (_("%d (default)"), autoconnect_slaves);
-	}
-}
-
-static char *
 secret_flags_to_string (guint32 flags, NMMetaAccessorGetType get_type)
 {
 	GString *flag_str;
@@ -1483,70 +1618,6 @@ verify_string_list (char **strv,
 	return TRUE;
 }
 
-static gboolean
-validate_int (NMSetting *setting, const char* prop, gint val, GError **error)
-{
-	GParamSpec *pspec;
-	GValue value = G_VALUE_INIT;
-	gboolean success = TRUE;
-
-	g_value_init (&value, G_TYPE_INT);
-	g_value_set_int (&value, val);
-	pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (G_OBJECT (setting)), prop);
-	g_assert (G_IS_PARAM_SPEC (pspec));
-	if (g_param_value_validate (pspec, &value)) {
-		GParamSpecInt *pspec_int = (GParamSpecInt *) pspec;
-		g_set_error (error, 1, 0, _("'%d' is not valid; use <%d-%d>"),
-		             val, pspec_int->minimum, pspec_int->maximum);
-		success = FALSE;
-	}
-	g_value_unset (&value);
-	return success;
-}
-
-static gboolean
-validate_int64 (NMSetting *setting, const char* prop, gint64 val, GError **error)
-{
-	GParamSpec *pspec;
-	GValue value = G_VALUE_INIT;
-	gboolean success = TRUE;
-
-	g_value_init (&value, G_TYPE_INT64);
-	g_value_set_int64 (&value, val);
-	pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (G_OBJECT (setting)), prop);
-	g_assert (G_IS_PARAM_SPEC (pspec));
-	if (g_param_value_validate (pspec, &value)) {
-		GParamSpecInt64 *pspec_int = (GParamSpecInt64 *) pspec;
-		G_STATIC_ASSERT (sizeof (long long) >= sizeof (gint64));
-		g_set_error (error, 1, 0, _("'%lld' is not valid; use <%lld-%lld>"),
-		             (long long) val, (long long) pspec_int->minimum, (long long) pspec_int->maximum);
-		success = FALSE;
-	}
-	g_value_unset (&value);
-	return success;
-}
-
-static gboolean
-validate_uint (NMSetting *setting, const char* prop, guint val, GError **error)
-{
-	GParamSpec *pspec;
-	GValue value = G_VALUE_INIT;
-	gboolean success = TRUE;
-
-	g_value_init (&value, G_TYPE_UINT);
-	g_value_set_uint (&value, val);
-	pspec = g_object_class_find_property (G_OBJECT_GET_CLASS (G_OBJECT (setting)), prop);
-	g_assert (G_IS_PARAM_SPEC (pspec));
-	if (g_param_value_validate (pspec, &value)) {
-		GParamSpecUInt *pspec_uint = (GParamSpecUInt *) pspec;
-		g_set_error (error, 1, 0, _("'%u' is not valid; use <%u-%u>"),
-		             val, pspec_uint->minimum, pspec_uint->maximum);
-		success = FALSE;
-	}
-	g_value_unset (&value);
-	return success;
-}
-
 static char *
 flag_values_to_string (GFlagsValue *array, guint n)
 {
@@ -1701,12 +1772,12 @@ nmc_util_is_domain (const char *domain)
 }
 
 static gboolean
-nmc_property_set_byte_array (NMSetting *setting, const char *prop, const char *value, GError **error)
+nmc_property_set_bytes (NMSetting *setting, const char *prop, const char *value, GError **error)
 {
-	char **strv = NULL, **iter;
-	char *val_strip;
+	gs_free char *val_strip = NULL;
+	gs_strfreev char **strv = NULL;
 	const char *delimiters = " \t,";
-	long int val_int;
+	char **iter;
 	GBytes *bytes;
 	GByteArray *array = NULL;
 	gboolean success = TRUE;
@@ -1717,30 +1788,35 @@ nmc_property_set_byte_array (NMSetting *setting, const char *prop, const char *v
 
 	/* First try hex string in the format of AAbbCCDd */
 	bytes = nm_utils_hexstr2bin (val_strip);
-	if (bytes) {
-		array = g_bytes_unref_to_array (bytes);
+	if (bytes)
 		goto done;
-	}
 
 	/* Otherwise, consider the following format: AA b 0xCc D */
 	strv = nmc_strsplit_set (val_strip, delimiters, 0);
 	array = g_byte_array_sized_new (g_strv_length (strv));
 	for (iter = strv; iter && *iter; iter++) {
-		if (!nmc_string_to_int_base (g_strstrip (*iter), 16, TRUE, 0, 255, &val_int)) {
+		int v;
+		guint8 v8;
+
+		v = _nm_utils_ascii_str_to_int64 (*iter, 16, 0, 255, -1);
+		if (v == -1) {
 			g_set_error (error, 1, 0, _("'%s' is not a valid hex character"), *iter);
+			g_byte_array_free (array, TRUE);
 			success = FALSE;
 			goto done;
 		}
-		g_byte_array_append (array, (const guint8 *) &val_int, 1);
+		v8 = v;
+		g_byte_array_append (array, &v8, 1);
 	}
+	bytes = g_byte_array_free_to_bytes (array);
 
 done:
 	if (success)
-		g_object_set (setting, prop, array, NULL);
+		g_object_set (setting, prop, bytes, NULL);
 
-	g_strfreev (strv);
-	if (array)
-		g_byte_array_free (array, TRUE);
+	if (bytes)
+		g_bytes_unref (bytes);
+
 	return success;
 }
 
@@ -2076,7 +2152,7 @@ DEFINE_SETTER_PRIV_KEY (_set_fcn_802_1x_phase2_private_key,
 static gboolean
 _set_fcn_802_1x_password_raw (ARGS_SET_FCN)
 {
-	return nmc_property_set_byte_array (setting, property_info->property_name, value, error);
+	return nmc_property_set_bytes (setting, property_info->property_name, value, error);
 }
 
 static gconstpointer
@@ -2196,7 +2272,7 @@ _values_fcn_bond_options (ARGS_VALUES_FCN)
 }
 
 static gconstpointer
-_get_fcn_connection_autoconnect_retires (ARGS_GET_FCN)
+_get_fcn_connection_autoconnect_retries (ARGS_GET_FCN)
 {
 	NMSettingConnection *s_con = NM_SETTING_CONNECTION (setting);
 	gint retries;
@@ -2248,14 +2324,6 @@ _get_fcn_connection_permissions (ARGS_GET_FCN)
 	/* No value from get_permission */
 	g_string_free (perm, TRUE);
 	return NULL;
-}
-
-static gconstpointer
-_get_fcn_connection_autoconnect_slaves (ARGS_GET_FCN)
-{
-	NMSettingConnection *s_con = NM_SETTING_CONNECTION (setting);
-	RETURN_UNSUPPORTED_GET_TYPE ();
-	RETURN_STR_TO_FREE (autoconnect_slaves_to_string (nm_setting_connection_get_autoconnect_slaves (s_con), get_type));
 }
 
 static gboolean
@@ -2600,27 +2668,6 @@ dcb_flags_to_string (NMSettingDcbFlags flags)
 		RETURN_STR_TO_FREE (dcb_flags_to_string (v)); \
 	}
 
-static char *
-dcb_app_priority_to_string (gint priority)
-{
-	return (priority == -1) ? g_strdup (_("-1 (unset)")) : g_strdup_printf ("%d", priority);
-}
-
-#define DEFINE_DCB_APP_PRIORITY_GETTER(func_name, property_name) \
-	static gconstpointer \
-	func_name (ARGS_GET_FCN) \
-	{ \
-		int v; \
-		GValue val = G_VALUE_INIT; \
-		\
-		RETURN_UNSUPPORTED_GET_TYPE (); \
-		g_value_init (&val, G_TYPE_INT); \
-		g_object_get_property (G_OBJECT (setting), property_name, &val); \
-		v = g_value_get_int (&val); \
-		g_value_unset (&val); \
-		RETURN_STR_TO_FREE (dcb_app_priority_to_string (v)); \
-	}
-
 #define DEFINE_DCB_BOOL_GETTER(func_name, getter_func_name) \
 	static gconstpointer \
 	func_name (ARGS_GET_FCN) \
@@ -2665,11 +2712,8 @@ dcb_app_priority_to_string (gint priority)
 	}
 
 DEFINE_DCB_FLAGS_GETTER (_get_fcn_dcb_app_fcoe_flags, NM_SETTING_DCB_APP_FCOE_FLAGS)
-DEFINE_DCB_APP_PRIORITY_GETTER (_get_fcn_dcb_app_fcoe_priority, NM_SETTING_DCB_APP_FCOE_PRIORITY)
 DEFINE_DCB_FLAGS_GETTER (_get_fcn_dcb_app_iscsi_flags, NM_SETTING_DCB_APP_ISCSI_FLAGS)
-DEFINE_DCB_APP_PRIORITY_GETTER (_get_fcn_dcb_app_iscsi_priority, NM_SETTING_DCB_APP_ISCSI_PRIORITY)
 DEFINE_DCB_FLAGS_GETTER (_get_fcn_dcb_app_fip_flags, NM_SETTING_DCB_APP_FIP_FLAGS)
-DEFINE_DCB_APP_PRIORITY_GETTER (_get_fcn_dcb_app_fip_priority, NM_SETTING_DCB_APP_FIP_PRIORITY)
 
 DEFINE_DCB_FLAGS_GETTER (_get_fcn_dcb_priority_flow_control_flags, NM_SETTING_DCB_PRIORITY_FLOW_CONTROL_FLAGS)
 DEFINE_DCB_BOOL_GETTER (_get_fcn_dcb_priority_flow_control, nm_setting_dcb_get_priority_flow_control)
@@ -2693,14 +2737,14 @@ _set_fcn_dcb_flags (ARGS_SET_FCN)
 	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
 	/* Check for overall hex numeric value */
-	if (nmc_string_to_int_base (value, 0, TRUE, 0, DCB_ALL_FLAGS, &t))
+	t = _nm_utils_ascii_str_to_int64 (value, 0, 0, DCB_ALL_FLAGS, -1);
+	if (t != -1)
 		flags = (guint) t;
 	else {
 		/* Check for individual flag numbers */
 		strv = nmc_strsplit_set (value, " \t,", 0);
 		for (iter = strv; iter && *iter; iter++) {
-			if (!nmc_string_to_int_base (*iter, 0, TRUE, 0, DCB_ALL_FLAGS, &t))
-				t = -1;
+			t = _nm_utils_ascii_str_to_int64 (*iter, 0, 0, DCB_ALL_FLAGS, -1);
 
 			if (   g_ascii_strcasecmp (*iter, "enable") == 0
 			    || g_ascii_strcasecmp (*iter, "enabled") == 0
@@ -2733,72 +2777,49 @@ _set_fcn_dcb_flags (ARGS_SET_FCN)
 }
 
 static gboolean
-_set_fcn_dcb_priority (ARGS_SET_FCN)
-{
-	long int priority = 0;
-
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-	if (!nmc_string_to_int (value, FALSE, -1, 7, &priority)) {
-		g_set_error (error, 1, 0, _("'%s' is not a DCB app priority"), value);
-		return FALSE;
-	}
-
-	/* Validate the number according to the property spec */
-	if (!validate_int (setting, property_info->property_name, (gint) priority, error))
-		return FALSE;
-
-	g_object_set (setting, property_info->property_name, (gint) priority, NULL);
-	return TRUE;
-}
-
-static gboolean
 dcb_parse_uint_array (const char *val,
                       guint max,
                       guint other,
                       guint *out_array,
                       GError **error)
 {
-	char **items, **iter;
-	guint i = 0;
+	gs_strfreev char **items = NULL;
+	char **iter;
+	gsize i;
 
-	g_return_val_if_fail (out_array != NULL, FALSE);
+	nm_assert (out_array);
 
 	items = g_strsplit_set (val, ",", -1);
 	if (g_strv_length (items) != 8) {
 		g_set_error_literal (error, 1, 0, _("must contain 8 comma-separated numbers"));
-		goto error;
+		return FALSE;
 	}
 
-	for (iter = items; iter && *iter; iter++) {
-		long int num = 0;
-		gboolean success;
+	i = 0;
+	for (iter = items; *iter; iter++) {
+		gint64 num;
 
 		*iter = g_strstrip (*iter);
-		success = nmc_string_to_int_base (*iter, 10, TRUE, 0, other ? other : max, &num);
+
+		num = _nm_utils_ascii_str_to_int64 (*iter, 10, 0, other ? other : max, -1);
 
 		/* If number is greater than 'max' it must equal 'other' */
-		if (success && other && (num > max) && (num != other))
-			success = FALSE;
-
-		if (!success) {
+		if (   num == -1
+		    || (other && (num > max) && (num != other))) {
 			if (other) {
 				g_set_error (error, 1, 0, _("'%s' not a number between 0 and %u (inclusive) or %u"),
-					     *iter, max, other);
+				             *iter, max, other);
 			} else {
 				g_set_error (error, 1, 0, _("'%s' not a number between 0 and %u (inclusive)"),
-					     *iter, max);
+				             *iter, max);
 			}
-			goto error;
+			return FALSE;
 		}
+		nm_assert (i < 8);
 		out_array[i++] = (guint) num;
 	}
 
 	return TRUE;
-
-error:
-	g_strfreev (items);
-	return FALSE;
 }
 
 static void
@@ -2958,25 +2979,22 @@ _set_fcn_gsm_sim_operator_id (ARGS_SET_FCN)
 static gboolean
 _set_fcn_infiniband_p_key (ARGS_SET_FCN)
 {
-	gboolean p_key_valid = FALSE;
-	long p_key_int;
+	const gint64 INVALID = G_MININT64;
+	gint64 p_key;
 
 	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
-	if (!strncasecmp (value, "0x", 2))
-		p_key_valid = nmc_string_to_int_base (value + 2, 16, TRUE, 0, G_MAXUINT16, &p_key_int);
-	else
-		p_key_valid = nmc_string_to_int (value, TRUE, -1, G_MAXUINT16, &p_key_int);
-
-	if (!p_key_valid) {
-		if (strcmp (value, "default") == 0)
-			p_key_int = -1;
-		else {
+	if (nm_streq (value, "default"))
+		p_key = -1;
+	else {
+		p_key = _nm_utils_ascii_str_to_int64 (value, 0, -1, G_MAXUINT16, INVALID);
+		if (p_key == INVALID) {
 			g_set_error (error, 1, 0, _("'%s' is not a valid IBoIP P_Key"), value);
 			return FALSE;
 		}
 	}
-	g_object_set (setting, property_info->property_name, (gint) p_key_int, NULL);
+
+	g_object_set (setting, property_info->property_name, (int) p_key, NULL);
 	return TRUE;
 }
 
@@ -2997,56 +3015,6 @@ _get_fcn_infiniband_p_key (ARGS_GET_FCN)
 			return _("default");
 	} else
 		RETURN_STR_TO_FREE (g_strdup_printf ("0x%04x", p_key));
-}
-
-static gconstpointer
-_get_fcn_ip_tunnel_mode (ARGS_GET_FCN)
-{
-	NMSettingIPTunnel *s_ip_tunnel = NM_SETTING_IP_TUNNEL (setting);
-	NMIPTunnelMode mode;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	mode = nm_setting_ip_tunnel_get_mode (s_ip_tunnel);
-	RETURN_STR_TO_FREE (nm_utils_enum_to_str (nm_ip_tunnel_mode_get_type (), mode));
-}
-
-static gboolean
-_set_fcn_ip_tunnel_mode (ARGS_SET_FCN)
-{
-	NMIPTunnelMode mode;
-	gboolean ret;
-
-	ret = nm_utils_enum_from_str (nm_ip_tunnel_mode_get_type(), value,
-	                              (int *) &mode, NULL);
-
-	if (!ret) {
-		gs_free const char **values = NULL;
-		gs_free char *values_str = NULL;
-
-		values = nm_utils_enum_get_values (nm_ip_tunnel_mode_get_type (),
-		                                   NM_IP_TUNNEL_MODE_UNKNOWN + 1,
-		                                   G_MAXINT);
-		values_str = g_strjoinv (",", (char **) values);
-		g_set_error (error, 1, 0, _("invalid mode '%s', use one of %s"),
-		             value, values_str);
-
-		return FALSE;
-	}
-
-	g_object_set (setting, property_info->property_name, mode, NULL);
-	return TRUE;
-}
-
-static NMIPAddress *
-_parse_ip_address (int family, const char *address, GError **error)
-{
-	char *value = g_strdup (address);
-	NMIPAddress *ipaddr;
-
-	ipaddr = nmc_parse_and_build_address (family, g_strstrip (value), error);
-	g_free (value);
-	return ipaddr;
 }
 
 static gconstpointer
@@ -3312,31 +3280,21 @@ DEFINE_REMOVER_INDEX_OR_VALUE (_remove_fcn_ipv4_config_dns_options,
                                nm_setting_ip_config_remove_dns_option,
                                _validate_and_remove_ipv4_dns_option)
 
-static NMIPAddress *
-_parse_ipv4_address (const char *address, GError **error)
-{
-	return _parse_ip_address (AF_INET, address, error);
-}
-
 static gboolean
 _set_fcn_ip4_config_addresses (ARGS_SET_FCN)
 {
-	char **strv = NULL, **iter;
+	gs_strfreev char **strv = NULL;
+	const char *const*iter;
 	NMIPAddress *ip4addr;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
 	strv = nmc_strsplit_set (value, ",", 0);
-	for (iter = strv; iter && *iter; iter++) {
-		ip4addr = _parse_ipv4_address (*iter, error);
-		if (!ip4addr) {
-			g_strfreev (strv);
+	for (iter = (const char *const*) strv; *iter; iter++) {
+		ip4addr = _parse_ip_address (AF_INET, *iter, error);
+		if (!ip4addr)
 			return FALSE;
-		}
 		nm_setting_ip_config_add_address (NM_SETTING_IP_CONFIG (setting), ip4addr);
 		nm_ip_address_unref (ip4addr);
 	}
-	g_strfreev (strv);
 	return TRUE;
 }
 
@@ -3348,14 +3306,15 @@ _validate_and_remove_ipv4_address (NMSettingIPConfig *setting,
 	NMIPAddress *ip4addr;
 	gboolean ret;
 
-	ip4addr = _parse_ipv4_address (address, error);
+	ip4addr = _parse_ip_address (AF_INET, address, error);
 	if (!ip4addr)
 		return FALSE;
 
 	ret = nm_setting_ip_config_remove_address_by_value (setting, ip4addr);
-	if (!ret)
+	if (!ret) {
 		g_set_error (error, 1, 0,
 		             _("the property doesn't contain IP address '%s'"), address);
+	}
 	nm_ip_address_unref (ip4addr);
 	return ret;
 }
@@ -3368,49 +3327,34 @@ DEFINE_REMOVER_INDEX_OR_VALUE (_remove_fcn_ipv4_config_addresses,
 static gboolean
 _set_fcn_ip4_config_gateway (ARGS_SET_FCN)
 {
-	NMIPAddress *ip4addr;
+	gs_free char *addr = NULL;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+	addr = g_strstrip (g_strdup (value));
 
-	if (strchr (value, '/')) {
-		g_set_error (error, 1, 0,
-	                     _("invalid gateway address '%s'"), value);
+	if (!nm_utils_ipaddr_valid (AF_INET, addr)) {
+		g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+	                 _("invalid gateway address '%s'"), value);
 		return FALSE;
 	}
-	ip4addr = _parse_ipv4_address (value, error);
-	if (!ip4addr)
-		return FALSE;
-
-	g_object_set (setting, property_info->property_name, value, NULL);
-	nm_ip_address_unref (ip4addr);
+	g_object_set (setting, property_info->property_name, addr, NULL);
 	return TRUE;
-}
-
-static NMIPRoute *
-_parse_ipv4_route (const char *route, GError **error)
-{
-	return nmc_parse_and_build_route (AF_INET, route, error);
 }
 
 static gboolean
 _set_fcn_ip4_config_routes (ARGS_SET_FCN)
 {
-	char **strv = NULL, **iter;
+	gs_strfreev char **strv = NULL;
+	const char *const*iter;
 	NMIPRoute *ip4route;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
 	strv = nmc_strsplit_set (value, ",", 0);
-	for (iter = strv; iter && *iter; iter++) {
-		ip4route = _parse_ipv4_route (*iter, error);
-		if (!ip4route) {
-			g_strfreev (strv);
+	for (iter = (const char *const*) strv; *iter; iter++) {
+		ip4route = _parse_ip_route (AF_INET, *iter, error);
+		if (!ip4route)
 			return FALSE;
-		}
 		nm_setting_ip_config_add_route (NM_SETTING_IP_CONFIG (setting), ip4route);
 		nm_ip_route_unref (ip4route);
 	}
-	g_strfreev (strv);
 	return TRUE;
 }
 
@@ -3422,7 +3366,7 @@ _validate_and_remove_ipv4_route (NMSettingIPConfig *setting,
 	NMIPRoute *ip4route;
 	gboolean ret;
 
-	ip4route = _parse_ipv4_route (route, error);
+	ip4route = _parse_ip_route (AF_INET, route, error);
 	if (!ip4route)
 		return FALSE;
 
@@ -3590,31 +3534,21 @@ DEFINE_REMOVER_INDEX_OR_VALUE (_remove_fcn_ipv6_config_dns_options,
                                nm_setting_ip_config_remove_dns_option,
                                _validate_and_remove_ipv6_dns_option)
 
-static NMIPAddress *
-_parse_ipv6_address (const char *address, GError **error)
-{
-	return _parse_ip_address (AF_INET6, address, error);
-}
-
 static gboolean
 _set_fcn_ip6_config_addresses (ARGS_SET_FCN)
 {
-	char **strv = NULL, **iter;
+	gs_strfreev char **strv = NULL;
+	const char *const*iter;
 	NMIPAddress *ip6addr;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
 	strv = nmc_strsplit_set (value, ",", 0);
-	for (iter = strv; iter && *iter; iter++) {
-		ip6addr = _parse_ipv6_address (*iter, error);
-		if (!ip6addr) {
-			g_strfreev (strv);
+	for (iter = (const char *const*) strv; *iter; iter++) {
+		ip6addr = _parse_ip_address (AF_INET6, *iter, error);
+		if (!ip6addr)
 			return FALSE;
-		}
 		nm_setting_ip_config_add_address (NM_SETTING_IP_CONFIG (setting), ip6addr);
 		nm_ip_address_unref (ip6addr);
 	}
-	g_strfreev (strv);
 	return TRUE;
 }
 
@@ -3626,7 +3560,7 @@ _validate_and_remove_ipv6_address (NMSettingIPConfig *setting,
 	NMIPAddress *ip6addr;
 	gboolean ret;
 
-	ip6addr = _parse_ipv6_address (address, error);
+	ip6addr = _parse_ip_address (AF_INET6, address, error);
 	if (!ip6addr)
 		return FALSE;
 
@@ -3645,49 +3579,36 @@ DEFINE_REMOVER_INDEX_OR_VALUE (_remove_fcn_ipv6_config_addresses,
 static gboolean
 _set_fcn_ip6_config_gateway (ARGS_SET_FCN)
 {
-	NMIPAddress *ip6addr;
+	gs_free char *addr = NULL;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+	addr = g_strstrip (g_strdup (value));
 
-	if (strchr (value, '/')) {
-		g_set_error (error, 1, 0,
-	                     _("invalid gateway address '%s'"), value);
+	if (!nm_utils_ipaddr_valid (AF_INET6, addr)) {
+		g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+		             _("invalid gateway address '%s'"),
+		             addr);
 		return FALSE;
 	}
-	ip6addr = _parse_ipv6_address (value, error);
-	if (!ip6addr)
-		return FALSE;
 
-	g_object_set (setting, property_info->property_name, value, NULL);
-	nm_ip_address_unref (ip6addr);
+	g_object_set (setting, property_info->property_name, addr, NULL);
 	return TRUE;
-}
-
-static NMIPRoute *
-_parse_ipv6_route (const char *route, GError **error)
-{
-	return nmc_parse_and_build_route (AF_INET6, route, error);
 }
 
 static gboolean
 _set_fcn_ip6_config_routes (ARGS_SET_FCN)
 {
-	char **strv = NULL, **iter;
+	gs_strfreev char **strv = NULL;
+	const char *const*iter;
 	NMIPRoute *ip6route;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
 	strv = nmc_strsplit_set (value, ",", 0);
-	for (iter = strv; iter && *iter; iter++) {
-		ip6route = _parse_ipv6_route (*iter, error);
-		if (!ip6route) {
-			g_strfreev (strv);
+	for (iter = (const char *const*) strv; *iter; iter++) {
+		ip6route = _parse_ip_route (AF_INET6, *iter, error);
+		if (!ip6route)
 			return FALSE;
-		}
 		nm_setting_ip_config_add_route (NM_SETTING_IP_CONFIG (setting), ip6route);
 		nm_ip_route_unref (ip6route);
 	}
-	g_strfreev (strv);
 	return TRUE;
 }
 
@@ -3699,7 +3620,7 @@ _validate_and_remove_ipv6_route (NMSettingIPConfig *setting,
 	NMIPRoute *ip6route;
 	gboolean ret;
 
-	ip6route = _parse_ipv6_route (route, error);
+	ip6route = _parse_ip_route (AF_INET6, route, error);
 	if (!ip6route)
 		return FALSE;
 
@@ -3739,124 +3660,6 @@ _set_fcn_ip6_config_ip6_privacy (ARGS_SET_FCN)
 }
 
 static gconstpointer
-_get_fcn_macsec_mode (ARGS_GET_FCN)
-{
-	NMSettingMacsec *s_macsec = NM_SETTING_MACSEC (setting);
-	NMSettingMacsecMode mode;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	mode = nm_setting_macsec_get_mode (s_macsec);
-	RETURN_STR_TO_FREE (nm_utils_enum_to_str (nm_setting_macsec_mode_get_type (), mode));
-}
-
-static gboolean
-_set_fcn_macsec_mode (ARGS_SET_FCN)
-{
-	NMSettingMacsecMode mode;
-	gs_free char *options = NULL;
-
-	if (!nm_utils_enum_from_str (nm_setting_macsec_mode_get_type (), value,
-	                             (int *) &mode, NULL)) {
-		options = g_strjoinv (",",
-		                      (char **) nm_utils_enum_get_values (nm_setting_macsec_mode_get_type (),
-		                                                          G_MININT,
-		                                                          G_MAXINT));
-		g_set_error (error, 1, 0, _("invalid option '%s', use one of [%s]"),
-		             value, options);
-			return FALSE;
-	}
-
-	g_object_set (setting, property_info->property_name, mode, NULL);
-	return TRUE;
-}
-
-static gconstpointer
-_get_fcn_macsec_validation (ARGS_GET_FCN)
-{
-	NMSettingMacsec *s_macsec = NM_SETTING_MACSEC (setting);
-	NMSettingMacsecValidation validation;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	validation = nm_setting_macsec_get_validation (s_macsec);
-	RETURN_STR_TO_FREE (nm_utils_enum_to_str (nm_setting_macsec_validation_get_type (), validation));
-}
-
-static gboolean
-_set_fcn_macsec_validation (ARGS_SET_FCN)
-{
-	NMSettingMacsecMode validation;
-	gs_free char *options = NULL;
-
-	if (!nm_utils_enum_from_str (nm_setting_macsec_validation_get_type (), value,
-	                             (int *) &validation, NULL)) {
-		options = g_strjoinv (",",
-		                      (char **) nm_utils_enum_get_values (nm_setting_macsec_validation_get_type (),
-		                                                          G_MININT,
-		                                                          G_MAXINT));
-		g_set_error (error, 1, 0, _("invalid option '%s', use one of [%s]"),
-		             value, options);
-			return FALSE;
-	}
-
-	g_object_set (setting, property_info->property_name, validation, NULL);
-	return TRUE;
-}
-
-static gconstpointer
-_get_fcn_macvlan_mode (ARGS_GET_FCN)
-{
-	NMSettingMacvlan *s_macvlan = NM_SETTING_MACVLAN (setting);
-	NMSettingMacvlanMode mode;
-	char *tmp, *str;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	mode = nm_setting_macvlan_get_mode (s_macvlan);
-	tmp = nm_utils_enum_to_str (nm_setting_macvlan_mode_get_type (), mode);
-
-	if (get_type != NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		str = tmp ?: g_strdup ("");
-	else {
-		str = g_strdup_printf ("%d (%s)", mode, tmp ?: "");
-		g_free (tmp);
-	}
-
-	RETURN_STR_TO_FREE (str);
-}
-
-static gboolean
-_set_fcn_macvlan_mode (ARGS_SET_FCN)
-{
-	NMSettingMacvlanMode mode;
-	gs_free const char **options = NULL;
-	gs_free char *options_str = NULL;
-	long int t;
-	gboolean ret;
-
-	if (nmc_string_to_int_base (value, 0, TRUE, 0, _NM_SETTING_MACVLAN_MODE_NUM - 1, &t))
-		mode = (NMSettingMacvlanMode) t;
-	else {
-		ret = nm_utils_enum_from_str (nm_setting_macvlan_mode_get_type (), value,
-		                              (int *) &mode, NULL);
-
-		if (!ret) {
-				options = nm_utils_enum_get_values (nm_setting_macvlan_mode_get_type(),
-				                                    NM_SETTING_MACVLAN_MODE_UNKNOWN + 1,
-				                                    G_MAXINT);
-				options_str = g_strjoinv (",", (char **) options);
-				g_set_error (error, 1, 0, _("invalid option '%s', use one of [%s]"),
-				             value, options_str);
-				return FALSE;
-			}
-		}
-
-	g_object_set (setting, property_info->property_name, (guint) mode, NULL);
-	return TRUE;
-}
-
-static gconstpointer
 _get_fcn_olpc_mesh_ssid (ARGS_GET_FCN)
 {
 	NMSettingOlpcMesh *s_olpc_mesh = NM_SETTING_OLPC_MESH (setting);
@@ -3889,155 +3692,24 @@ _set_fcn_olpc_mesh_channel (ARGS_SET_FCN)
 	return TRUE;
 }
 
-static gconstpointer
-_get_fcn_proxy_method (ARGS_GET_FCN)
-{
-	NMSettingProxy *s_proxy = NM_SETTING_PROXY (setting);
-	NMSettingProxyMethod method;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	method = nm_setting_proxy_get_method (s_proxy);
-	RETURN_STR_TO_FREE (nm_utils_enum_to_str (nm_setting_proxy_method_get_type (), method));
-}
-
-static gboolean
-_set_fcn_proxy_method (ARGS_SET_FCN)
-{
-	int method;
-	gboolean ret;
-
-	ret = nm_utils_enum_from_str (nm_setting_proxy_method_get_type(), value,
-	                              &method, NULL);
-
-	if (!ret) {
-		gs_free const char **values = NULL;
-		gs_free char *values_str = NULL;
-
-		values = nm_utils_enum_get_values (nm_setting_proxy_method_get_type (),
-		                                   NM_SETTING_PROXY_METHOD_NONE,
-		                                   G_MAXINT);
-		values_str = g_strjoinv (",", (char **) values);
-		g_set_error (error, 1, 0, _("invalid method '%s', use one of %s"),
-		             value, values_str);
-
-		return FALSE;
-	}
-
-	g_object_set (setting, property_info->property_name, method, NULL);
-	return TRUE;
-}
-
-static gboolean
-_set_fcn_proxy_pac_script (ARGS_SET_FCN)
+static const char *
+_validate_fcn_proxy_pac_script (const char *value, char **out_to_free, GError **error)
 {
 	char *script = NULL;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-	if (!nmc_proxy_check_script (value, &script, error)) {
-		return FALSE;
-	}
-	g_object_set (setting, property_info->property_name, script, NULL);
-	g_free (script);
-	return TRUE;
+	if (!nmc_proxy_check_script (value, &script, error))
+		return NULL;
+	RETURN_STR_TO_FREE (script);
 }
 
-static gconstpointer
-_get_fcn_serial_parity (ARGS_GET_FCN)
-{
-	NMSettingSerial *s_serial = NM_SETTING_SERIAL (setting);
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	switch (nm_setting_serial_get_parity (s_serial)) {
-	case NM_SETTING_SERIAL_PARITY_EVEN:
-		return "even";
-	case NM_SETTING_SERIAL_PARITY_ODD:
-		return "odd";
-	default:
-	case NM_SETTING_SERIAL_PARITY_NONE:
-		return "none";
-	}
-}
-
-static gboolean
-_set_fcn_serial_parity (ARGS_SET_FCN)
-{
-	NMSettingSerialParity parity;
-
-	if (value[0] == 'E' || value[0] == 'e')
-		parity = NM_SETTING_SERIAL_PARITY_EVEN;
-	else if (value[0] == 'O' || value[0] == 'o')
-		parity = NM_SETTING_SERIAL_PARITY_ODD;
-	else if (value[0] == 'N' || value[0] == 'n')
-		parity = NM_SETTING_SERIAL_PARITY_NONE;
-	else {
-		g_set_error (error, 1, 0, _("'%s' is not valid; use [e, o, n]"), value);
-		return FALSE;
-	}
-
-	g_object_set (setting, property_info->property_name, parity, NULL);
-	return TRUE;
-}
-
-static gboolean
-_set_fcn_team_config (ARGS_SET_FCN)
+static const char *
+_validate_fcn_team_config (const char *value, char **out_to_free, GError **error)
 {
 	char *json = NULL;
 
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-	if (!nmc_team_check_config (value, &json, error)) {
-		return FALSE;
-	}
-	g_object_set (setting, property_info->property_name, json, NULL);
-	g_free (json);
-	return TRUE;
-}
-
-static gconstpointer
-_get_fcn_tun_mode (ARGS_GET_FCN)
-{
-	NMSettingTun *s_tun = NM_SETTING_TUN (setting);
-	NMSettingTunMode mode;
-	char *tmp, *str;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	mode = nm_setting_tun_get_mode (s_tun);
-	tmp = nm_utils_enum_to_str (nm_setting_tun_mode_get_type (), mode);
-	if (get_type != NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		str = tmp ?: g_strdup ("");
-	else {
-		str = g_strdup_printf ("%d (%s)", mode, tmp ? tmp : "");
-		g_free (tmp);
-	}
-	RETURN_STR_TO_FREE (str);
-}
-
-static gboolean
-_set_fcn_tun_mode (ARGS_SET_FCN)
-{
-	NMSettingTunMode mode;
-	gboolean ret;
-	long int t;
-
-	if (nmc_string_to_int_base (value, 0, TRUE, 0, NM_SETTING_TUN_MODE_TAP, &t))
-		mode = (NMSettingTunMode) t;
-	else {
-		ret = nm_utils_enum_from_str (nm_setting_tun_mode_get_type (), value,
-		                              (int *) &mode, NULL);
-
-		if (!ret) {
-			g_set_error (error, 1, 0, _("invalid option '%s', use '%s' or '%s'"),
-			             value, "tun", "tap");
-			return FALSE;
-		}
-	}
-
-	g_object_set (setting, property_info->property_name, (guint) mode, NULL);
-	return TRUE;
+	if (!nmc_team_check_config (value, &json, error))
+		return NULL;
+	RETURN_STR_TO_FREE (json);
 }
 
 static gconstpointer
@@ -4072,7 +3744,7 @@ _set_vlan_xgress_priority_map (NMSetting *setting,
 {
 	char **prio_map, **p;
 
-	prio_map = nmc_vlan_parse_priority_maps (value, map_type, error);
+	prio_map = _parse_vlan_priority_maps (value, map_type, error);
 	if (!prio_map)
 		return FALSE;
 
@@ -4113,7 +3785,7 @@ _remove_vlan_xgress_priority_map (const NMMetaEnvironment *environment,
 		char **prio_map;
 		gs_free char *v = g_strdup (value);
 
-		prio_map = nmc_vlan_parse_priority_maps (v, map_type, error);
+		prio_map = _parse_vlan_priority_maps (v, map_type, error);
 		if (!prio_map)
 			return FALSE;
 		if (prio_map[1]) {
@@ -4234,67 +3906,6 @@ DEFINE_REMOVER_OPTION (_remove_fcn_vpn_secrets,
                        NM_SETTING_VPN,
                        nm_setting_vpn_remove_secret)
 
-static gconstpointer
-_get_fcn_wired_wake_on_lan (ARGS_GET_FCN)
-{
-	NMSettingWired *s_wired = NM_SETTING_WIRED (setting);
-	NMSettingWiredWakeOnLan wol;
-	char *tmp, *str;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	wol = nm_setting_wired_get_wake_on_lan (s_wired);
-	tmp = nm_utils_enum_to_str (nm_setting_wired_wake_on_lan_get_type (), wol);
-	if (get_type != NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		str = g_strdup_printf ("%s", tmp && *tmp ? tmp : "none");
-	else
-		str = g_strdup_printf ("%d (%s)", wol, tmp && *tmp ? tmp : "none");
-	g_free (tmp);
-	RETURN_STR_TO_FREE (str);
-}
-
-static gboolean
-_set_fcn_wired_wake_on_lan (ARGS_SET_FCN)
-{
-	NMSettingWiredWakeOnLan wol;
-	gs_free char *err_token = NULL;
-	gboolean ret;
-	long int t;
-
-	if (nmc_string_to_int_base (value, 0, TRUE, 0,
-	                            NM_SETTING_WIRED_WAKE_ON_LAN_ALL
-	                            | NM_SETTING_WIRED_WAKE_ON_LAN_EXCLUSIVE_FLAGS,
-	                            &t))
-		wol = (NMSettingWiredWakeOnLan) t;
-	else {
-		ret = nm_utils_enum_from_str (nm_setting_wired_wake_on_lan_get_type (), value,
-		                              (int *) &wol, &err_token);
-
-		if (!ret) {
-			if (   g_ascii_strcasecmp (err_token, "none") == 0
-			    || g_ascii_strcasecmp (err_token, "disable") == 0
-			    || g_ascii_strcasecmp (err_token, "disabled") == 0)
-				wol = NM_SETTING_WIRED_WAKE_ON_LAN_NONE;
-			else {
-				g_set_error (error, 1, 0, _("invalid option '%s', use a combination of [%s] or 'ignore', 'default' or 'none'"),
-				             err_token,
-				             nm_utils_enum_to_str (nm_setting_wired_wake_on_lan_get_type (),
-				                                   NM_SETTING_WIRED_WAKE_ON_LAN_ALL));
-				return FALSE;
-			}
-		}
-	}
-
-	if (   NM_FLAGS_ANY (wol, NM_SETTING_WIRED_WAKE_ON_LAN_EXCLUSIVE_FLAGS)
-	    && !nm_utils_is_power_of_two (wol)) {
-		g_set_error_literal (error, 1, 0, _("'default' and 'ignore' are incompatible with other flags"));
-		return FALSE;
-	}
-
-	g_object_set (setting, property_info->property_name, (guint) wol, NULL);
-	return TRUE;
-}
-
 DEFINE_SETTER_MAC_BLACKLIST (_set_fcn_wired_mac_address_blacklist,
                              NM_SETTING_WIRED,
                              nm_setting_wired_add_mac_blacklist_item)
@@ -4406,29 +4017,6 @@ _get_fcn_wireless_ssid (ARGS_GET_FCN)
 	RETURN_STR_TO_FREE (ssid_str);
 }
 
-static gconstpointer
-_get_fcn_wireless_mac_address_randomization (ARGS_GET_FCN)
-{
-	NMSettingWireless *s_wifi = NM_SETTING_WIRELESS (setting);
-	NMSettingMacRandomization randomization = nm_setting_wireless_get_mac_address_randomization (s_wifi);
-	const char *s;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	if (randomization == NM_SETTING_MAC_RANDOMIZATION_DEFAULT)
-		s = N_("default");
-	else if (randomization == NM_SETTING_MAC_RANDOMIZATION_NEVER)
-		s = N_("never");
-	else if (randomization == NM_SETTING_MAC_RANDOMIZATION_ALWAYS)
-		s = N_("always");
-	else
-		s = N_("unknown");
-
-	if (get_type == NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		return _(s);
-	return s;
-}
-
 static gboolean
 _set_fcn_wireless_channel (ARGS_SET_FCN)
 {
@@ -4479,36 +4067,6 @@ DEFINE_REMOVER_INDEX_OR_VALUE (_remove_fcn_wireless_mac_address_blacklist,
                                nm_setting_wireless_remove_mac_blacklist_item,
                                _validate_and_remove_wifi_mac_blacklist_item)
 
-static gboolean
-_set_fcn_wireless_mac_address_randomization (ARGS_SET_FCN)
-{
-	NMSettingMacRandomization randomization;
-	gs_free char *err_token = NULL;
-	gboolean ret;
-	long int t;
-
-	if (nmc_string_to_int_base (value, 0, TRUE,
-	                            NM_SETTING_MAC_RANDOMIZATION_DEFAULT,
-	                            NM_SETTING_MAC_RANDOMIZATION_ALWAYS,
-	                            &t))
-		randomization = (NMSettingMacRandomization) t;
-	else {
-		ret = nm_utils_enum_from_str (nm_setting_mac_randomization_get_type (),
-		                              value,
-		                              (int *) &randomization,
-		                              &err_token);
-
-		if (!ret) {
-			g_set_error (error, 1, 0, _("invalid option '%s', use 'default', 'never' or 'always'"),
-			             err_token);
-			return FALSE;
-		}
-	}
-
-	g_object_set (setting, property_info->property_name, (guint) randomization, NULL);
-	return TRUE;
-}
-
 static gconstpointer
 _get_fcn_wireless_security_wep_key0 (ARGS_GET_FCN)
 {
@@ -4543,13 +4101,6 @@ _get_fcn_wireless_security_wep_key3 (ARGS_GET_FCN)
 
 	RETURN_UNSUPPORTED_GET_TYPE ();
 	RETURN_STR_TO_FREE (g_strdup (nm_setting_wireless_security_get_wep_key (s_wireless_sec, 3)));
-}
-
-static gconstpointer
-_get_fcn_wireless_security_wep_key_type (ARGS_GET_FCN)
-{
-	RETURN_UNSUPPORTED_GET_TYPE ();
-	RETURN_STR_TO_FREE (wep_key_type_to_string (nm_setting_wireless_security_get_wep_key_type (NM_SETTING_WIRELESS_SECURITY (setting))));
 }
 
 static const char *wifi_sec_valid_protos[] = { "wpa", "rsn", NULL };
@@ -4714,63 +4265,48 @@ _set_fcn_wireless_wep_key (ARGS_SET_FCN)
 	return TRUE;
 }
 
-static gboolean
-_set_fcn_wireless_security_wep_key_type (ARGS_SET_FCN)
+static void
+_gobject_enum_pre_set_notify_fcn_wireless_security_wep_key_type (const NMMetaPropertyInfo *property_info,
+                                                                 const NMMetaEnvironment *environment,
+                                                                 gpointer environment_user_data,
+                                                                 NMSetting *setting,
+                                                                 int value)
 {
-	unsigned long  type_int;
-	const char *valid_wep_types[] = { "unknown", "key", "passphrase", NULL };
-	const char *type_str = NULL;
-	NMWepKeyType type = NM_WEP_KEY_TYPE_UNKNOWN;
-
-	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-	if (!nmc_string_to_uint (value, TRUE, 0, 2, &type_int)) {
-		if (!(type_str = nmc_string_is_valid (value, valid_wep_types, NULL))) {
-			g_set_error (error, 1, 0, _("'%s' not among [0 (unknown), 1 (key), 2 (passphrase)]"), value);
-			return FALSE;
-		}
-		if (type_str == valid_wep_types[1])
-			type = NM_WEP_KEY_TYPE_KEY;
-		else if (type_str == valid_wep_types[2])
-			type = NM_WEP_KEY_TYPE_PASSPHRASE;
-	} else
-		type = (NMWepKeyType) type_int;
+	guint i;
+	const char *key;
+	const char *keynames[] = {
+		NM_SETTING_WIRELESS_SECURITY_WEP_KEY0,
+		NM_SETTING_WIRELESS_SECURITY_WEP_KEY1,
+		NM_SETTING_WIRELESS_SECURITY_WEP_KEY2,
+		NM_SETTING_WIRELESS_SECURITY_WEP_KEY3,
+	};
 
 	/* Check type compatibility with set keys */
-	{
-		guint i;
-		const char *key;
-		const char *keynames[] = {
-			NM_SETTING_WIRELESS_SECURITY_WEP_KEY0,
-			NM_SETTING_WIRELESS_SECURITY_WEP_KEY1,
-			NM_SETTING_WIRELESS_SECURITY_WEP_KEY2,
-			NM_SETTING_WIRELESS_SECURITY_WEP_KEY3,
-		};
+	if (!NM_IN_SET (value,
+	                NM_WEP_KEY_TYPE_UNKNOWN,
+	                NM_WEP_KEY_TYPE_KEY,
+	                NM_WEP_KEY_TYPE_PASSPHRASE))
+		return;
 
-		for (i = 0; i < 4; i++) {
-			key = nm_setting_wireless_security_get_wep_key (NM_SETTING_WIRELESS_SECURITY (setting), i);
-			if (key && !nm_utils_wep_key_valid (key, type)) {
-				_env_warn_fcn (environment, environment_user_data,
-				               NM_META_ENV_WARN_LEVEL_WARN,
-				               N_("'%s' is not compatible with '%s' type, please change or delete the key."),
-				               keynames[i], wep_key_type_to_string (type));
-			}
+	for (i = 0; i < 4; i++) {
+		key = nm_setting_wireless_security_get_wep_key (NM_SETTING_WIRELESS_SECURITY (setting), i);
+		if (key && !nm_utils_wep_key_valid (key, value)) {
+			_env_warn_fcn (environment, environment_user_data,
+			               NM_META_ENV_WARN_LEVEL_WARN,
+			               N_("'%s' is not compatible with '%s' type, please change or delete the key."),
+			               keynames[i], wep_key_type_to_string (value));
 		}
 	}
-
-	g_object_set (setting, property_info->property_name, type, NULL);
-	return TRUE;
 }
 
-static gboolean
-_set_fcn_wireless_security_psk (ARGS_SET_FCN)
+static const char *
+_validate_fcn_wireless_security_psk (const char *value, char **out_to_free, GError **error)
 {
 	if (!nm_utils_wpa_psk_valid (value)) {
 		g_set_error (error, 1, 0, _("'%s' is not a valid PSK"), value);
-		return FALSE;
+		return NULL;
 	}
-	g_object_set (setting, property_info->property_name, value, NULL);
-	return TRUE;
+	return value;
 }
 
 /*****************************************************************************/
@@ -4899,23 +4435,18 @@ static const NMMetaPropertyType _pt_gobject_bool = {
 };
 
 static const NMMetaPropertyType _pt_gobject_int = {
-	.get_fcn =                      _get_fcn_gobject,
+	.get_fcn =                      _get_fcn_gobject_int,
 	.set_fcn =                      _set_fcn_gobject_int,
-};
-
-static const NMMetaPropertyType _pt_gobject_int64 = {
-	.get_fcn =                      _get_fcn_gobject,
-	.set_fcn =                      _set_fcn_gobject_int64,
-};
-
-static const NMMetaPropertyType _pt_gobject_uint = {
-	.get_fcn =                      _get_fcn_gobject,
-	.set_fcn =                      _set_fcn_gobject_uint,
 };
 
 static const NMMetaPropertyType _pt_gobject_mtu = {
 	.get_fcn =                      _get_fcn_gobject_mtu,
 	.set_fcn =                      _set_fcn_gobject_mtu,
+};
+
+static const NMMetaPropertyType _pt_gobject_dcb_priority = {
+	.get_fcn =                      _get_fcn_gobject_dcb_priority,
+	.set_fcn =                      _set_fcn_gobject_int,
 };
 
 static const NMMetaPropertyType _pt_gobject_mac = {
@@ -4964,6 +4495,7 @@ static const NMMetaPropertyType _pt_gobject_devices = {
 #define VALUES_STATIC(...)  (((const char *[]) { __VA_ARGS__, NULL }))
 
 #define ENUM_VALUE_INFOS(...)  (((const NMUtilsEnumValueInfo []) { __VA_ARGS__, { 0 } }))
+#define INT_VALUE_INFOS(...)  (((const NMMetaUtilsIntValueInfo []) { __VA_ARGS__, { 0 } }))
 
 #define GET_FCN_WITH_DEFAULT(type, func) \
 	/* macro that returns @func as const (gboolean(*)(NMSetting*)) type, but checks
@@ -5271,10 +4803,10 @@ static const NMMetaPropertyInfo *const property_infos_ADSL[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_ADSL_VPI,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_ADSL_VCI,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	NULL
 };
@@ -5285,7 +4817,6 @@ static const NMMetaPropertyInfo *const property_infos_BLUETOOTH[] = {
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BLUETOOTH_BDADDR,
 		.is_cli_option =                TRUE,
 		.property_alias =               "addr",
-		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
 		.prompt =                       N_("Bluetooth device address"),
 		.property_type =                &_pt_gobject_mac,
 	),
@@ -5297,7 +4828,8 @@ static const NMMetaPropertyInfo *const property_infos_BLUETOOTH[] = {
 		.property_type =                &_pt_gobject_string,
 		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
 			.values_static =            VALUES_STATIC (NM_SETTING_BLUETOOTH_TYPE_DUN,
-			                                           NM_SETTING_BLUETOOTH_TYPE_PANU),
+			                                           NM_SETTING_BLUETOOTH_TYPE_PANU,
+			                                           NM_SETTING_BLUETOOTH_TYPE_NAP),
 		),
 	),
 	NULL
@@ -5343,31 +4875,31 @@ static const NMMetaPropertyInfo *const property_infos_BRIDGE[] = {
 		.is_cli_option =                TRUE,
 		.property_alias =               "priority",
 		.prompt =                       N_("STP priority [32768]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_FORWARD_DELAY,
 		.is_cli_option =                TRUE,
 		.property_alias =               "forward-delay",
 		.prompt =                       N_("Forward delay [15]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_HELLO_TIME,
 		.is_cli_option =                TRUE,
 		.property_alias =               "hello-time",
 		.prompt =                       N_("Hello time [2]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_MAX_AGE,
 		.is_cli_option =                TRUE,
 		.property_alias =               "max-age",
 		.prompt =                       N_("Max age [20]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_AGEING_TIME,
 		.is_cli_option =                TRUE,
 		.property_alias =               "ageing-time",
 		.prompt =                       N_("MAC address ageing time [300]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_MULTICAST_SNOOPING,
 		.is_cli_option =                TRUE,
@@ -5385,13 +4917,13 @@ static const NMMetaPropertyInfo *const property_infos_BRIDGE_PORT[] = {
 		.is_cli_option =                TRUE,
 		.property_alias =               "priority",
 		.prompt =                       N_("Bridge port priority [32]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_PORT_PATH_COST,
 		.is_cli_option =                TRUE,
 		.property_alias =               "path-cost",
 		.prompt =                       N_("Bridge port STP path cost [100]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_PORT_HAIRPIN_MODE,
 		.is_cli_option =                TRUE,
@@ -5482,7 +5014,7 @@ static const NMMetaPropertyInfo *const property_infos_CONNECTION[] = {
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_AUTOCONNECT_RETRIES,
 		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_connection_autoconnect_retires,
+			.get_fcn =                  _get_fcn_connection_autoconnect_retries,
 			.set_fcn =                  _set_fcn_gobject_int,
 		),
 	),
@@ -5530,10 +5062,7 @@ static const NMMetaPropertyInfo *const property_infos_CONNECTION[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_AUTOCONNECT_SLAVES,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_connection_autoconnect_slaves,
-			.set_fcn =                  _set_fcn_gobject_trilean,
-		),
+		.property_type =                &_pt_gobject_enum,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_SECONDARIES,
 		.describe_message =
@@ -5550,7 +5079,7 @@ static const NMMetaPropertyInfo *const property_infos_CONNECTION[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_GATEWAY_PING_TIMEOUT,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_METERED,
 		.describe_message =
@@ -5596,10 +5125,7 @@ static const NMMetaPropertyInfo *const property_infos_DCB[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FCOE_PRIORITY,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_dcb_app_fcoe_priority,
-			.set_fcn =                  _set_fcn_dcb_priority,
-		),
+		.property_type =                &_pt_gobject_dcb_priority,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FCOE_MODE,
 		.property_type =                &_pt_gobject_string,
@@ -5615,10 +5141,7 @@ static const NMMetaPropertyInfo *const property_infos_DCB[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_ISCSI_PRIORITY,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_dcb_app_iscsi_priority,
-			.set_fcn =                  _set_fcn_dcb_priority,
-		),
+		.property_type =                &_pt_gobject_dcb_priority,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FIP_FLAGS,
 		.property_type = DEFINE_PROPERTY_TYPE (
@@ -5627,10 +5150,7 @@ static const NMMetaPropertyInfo *const property_infos_DCB[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FIP_PRIORITY,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_dcb_app_fip_priority,
-			.set_fcn =                  _set_fcn_dcb_priority,
-		),
+		.property_type =                &_pt_gobject_dcb_priority,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_PRIORITY_FLOW_CONTROL_FLAGS,
 		.property_type = DEFINE_PROPERTY_TYPE (
@@ -5881,7 +5401,7 @@ static const NMMetaPropertyInfo *const property_infos_IP4_CONFIG[] = {
 		),
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_ROUTE_METRIC, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_ROUTE_METRIC,
-		.property_type =                &_pt_gobject_int64,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_IGNORE_AUTO_ROUTES, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_IGNORE_AUTO_ROUTES,
 		.property_type =                &_pt_gobject_bool,
@@ -6008,7 +5528,7 @@ static const NMMetaPropertyInfo *const property_infos_IP6_CONFIG[] = {
 		),
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_ROUTE_METRIC, DESCRIBE_DOC_NM_SETTING_IP6_CONFIG_ROUTE_METRIC,
-		.property_type =                &_pt_gobject_int64,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_IGNORE_AUTO_ROUTES, DESCRIBE_DOC_NM_SETTING_IP6_CONFIG_IGNORE_AUTO_ROUTES,
 		.property_type =                &_pt_gobject_bool,
@@ -6058,15 +5578,15 @@ static const NMMetaPropertyInfo *const property_infos_IP_TUNNEL[] = {
 		.property_alias =               "mode",
 		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
 		.prompt =                       NM_META_TEXT_PROMPT_IP_TUNNEL_MODE,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_ip_tunnel_mode,
-			.set_fcn =                  _set_fcn_ip_tunnel_mode,
-			.values_fcn =               _values_fcn_gobject_enum,
-		),
-		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
-			.get_gtype =        nm_ip_tunnel_mode_get_type,
-			.min =              NM_IP_TUNNEL_MODE_UNKNOWN + 1,
-			.max =              G_MAXINT,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_ip_tunnel_mode_get_type,
+				.min =                  NM_IP_TUNNEL_MODE_UNKNOWN + 1,
+				.max =                  G_MAXINT,
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_PARENT,
@@ -6089,10 +5609,10 @@ static const NMMetaPropertyInfo *const property_infos_IP_TUNNEL[] = {
 		.property_type =                &_pt_gobject_string,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_TTL,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_TOS,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_PATH_MTU_DISCOVERY,
 		.property_type =                &_pt_gobject_bool,
@@ -6104,10 +5624,10 @@ static const NMMetaPropertyInfo *const property_infos_IP_TUNNEL[] = {
 		.property_type =                &_pt_gobject_string,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_ENCAPSULATION_LIMIT,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_FLOW_LABEL,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_IP_TUNNEL_MTU,
 		.property_type =                &_pt_gobject_mtu,
@@ -6131,13 +5651,13 @@ static const NMMetaPropertyInfo *const property_infos_MACSEC[] = {
 		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
 		.prompt =                       NM_META_TEXT_PROMPT_MACSEC_MODE,
 		.def_hint =                     NM_META_TEXT_PROMPT_MACSEC_MODE_CHOICES,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_macsec_mode,
-			.set_fcn =                  _set_fcn_macsec_mode,
-			.values_fcn =               _values_fcn_gobject_enum,
-		),
-		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
-			.get_gtype =        nm_setting_macsec_mode_get_type,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_macsec_mode_get_type,
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_MACSEC_ENCRYPT,
@@ -6169,13 +5689,13 @@ static const NMMetaPropertyInfo *const property_infos_MACSEC[] = {
 		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_MACSEC_VALIDATION,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_macsec_validation,
-			.set_fcn =                  _set_fcn_macsec_validation,
-			.values_fcn =               _values_fcn_gobject_enum,
-		),
-		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
-			.get_gtype =        nm_setting_macsec_validation_get_type,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_macsec_validation_get_type,
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	NULL
@@ -6196,15 +5716,11 @@ static const NMMetaPropertyInfo *const property_infos_MACVLAN[] = {
 		.property_alias =               "mode",
 		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
 		.prompt =                       NM_META_TEXT_PROMPT_MACVLAN_MODE,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_macvlan_mode,
-			.set_fcn =                  _set_fcn_macvlan_mode,
-			.values_fcn =               _values_fcn_gobject_enum,
-		),
+		.property_type =                &_pt_gobject_enum,
 		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
-			.get_gtype =        nm_setting_macvlan_mode_get_type,
-			.min =              NM_SETTING_MACVLAN_MODE_UNKNOWN + 1,
-			.max =              G_MAXINT,
+			.get_gtype =                nm_setting_macvlan_mode_get_type,
+			.min =                      NM_SETTING_MACVLAN_MODE_UNKNOWN + 1,
+			.max =                      G_MAXINT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_MACVLAN_PROMISCUOUS,
@@ -6322,10 +5838,10 @@ static const NMMetaPropertyInfo *const property_infos_PPP[] = {
 		.property_type =                &_pt_gobject_bool,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPP_BAUD,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPP_MRU,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPP_MTU,
 		.property_type =                &_pt_gobject_mtu,
@@ -6334,10 +5850,10 @@ static const NMMetaPropertyInfo *const property_infos_PPP[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPP_LCP_ECHO_FAILURE,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPP_LCP_ECHO_INTERVAL,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	NULL
 };
@@ -6350,15 +5866,13 @@ static const NMMetaPropertyInfo *const property_infos_PROXY[] = {
 		.property_alias =               "method",
 		.prompt =                       NM_META_TEXT_PROMPT_PROXY_METHOD,
 		.def_hint =                     NM_META_TEXT_PROMPT_PROXY_METHOD_CHOICES,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_proxy_method,
-			.set_fcn =                  _set_fcn_proxy_method,
-			.values_fcn =               _values_fcn_gobject_enum,
-		),
-		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
-			.get_gtype =        nm_setting_proxy_method_get_type,
-			.min =              NM_SETTING_PROXY_METHOD_NONE,
-			.max =              G_MAXINT,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_proxy_method_get_type,
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PROXY_BROWSER_ONLY,
@@ -6377,9 +5891,9 @@ static const NMMetaPropertyInfo *const property_infos_PROXY[] = {
 		.is_cli_option =                TRUE,
 		.property_alias =               "pac-script",
 		.prompt =                       N_("PAC script"),
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_gobject,
-			.set_fcn =                  _set_fcn_proxy_pac_script,
+		.property_type =                &_pt_gobject_string,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_string,
+			.validate_fcn =             _validate_fcn_proxy_pac_script,
 		),
 	),
 	NULL
@@ -6393,9 +5907,9 @@ static const NMMetaPropertyInfo *const property_infos_TEAM[] = {
 		.property_alias =               "config",
 		.prompt =                       N_("Team JSON configuration [none]"),
 		.describe_message =             TEAM_DESCRIBE_MESSAGE,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_gobject,
-			.set_fcn =                  _set_fcn_team_config,
+		.property_type =                &_pt_gobject_string,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_string,
+			.validate_fcn =             _validate_fcn_team_config,
 		),
 	),
 	NULL
@@ -6409,9 +5923,9 @@ static const NMMetaPropertyInfo *const property_infos_TEAM_PORT[] = {
 		.property_alias =               "config",
 		.prompt =                       N_("Team JSON configuration [none]"),
 		.describe_message =             TEAM_DESCRIBE_MESSAGE,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_gobject,
-			.set_fcn =                  _set_fcn_team_config,
+		.property_type =                &_pt_gobject_string,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_string,
+			.validate_fcn =             _validate_fcn_team_config,
 		),
 	),
 	NULL
@@ -6421,22 +5935,52 @@ static const NMMetaPropertyInfo *const property_infos_TEAM_PORT[] = {
 #define _CURRENT_NM_META_SETTING_TYPE NM_META_SETTING_TYPE_SERIAL
 static const NMMetaPropertyInfo *const property_infos_SERIAL[] = {
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_SERIAL_BAUD,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_SERIAL_BITS,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_SERIAL_PARITY,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_serial_parity,
-			.set_fcn =                  _set_fcn_serial_parity,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_serial_parity_get_type,
+				.value_infos =          ENUM_VALUE_INFOS (
+					{
+						.value = NM_SETTING_SERIAL_PARITY_EVEN,
+						.nick = "E",
+					},
+					{
+						.value = NM_SETTING_SERIAL_PARITY_EVEN,
+						.nick = "e",
+					},
+					{
+						.value = NM_SETTING_SERIAL_PARITY_ODD,
+						.nick = "O",
+					},
+					{
+						.value = NM_SETTING_SERIAL_PARITY_ODD,
+						.nick = "o",
+					},
+					{
+						.value = NM_SETTING_SERIAL_PARITY_NONE,
+						.nick = "N",
+					},
+					{
+						.value = NM_SETTING_SERIAL_PARITY_NONE,
+						.nick = "n",
+					}
+				),
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_SERIAL_STOPBITS,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_SERIAL_SEND_DELAY,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	NULL
 };
@@ -6449,12 +5993,11 @@ static const NMMetaPropertyInfo *const property_infos_TUN[] = {
 		.property_alias =               "mode",
 		.prompt =                       NM_META_TEXT_PROMPT_TUN_MODE,
 		.def_hint =                     NM_META_TEXT_PROMPT_TUN_MODE_CHOICES,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_tun_mode,
-			.set_fcn =                  _set_fcn_tun_mode,
-		),
-		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
-			.values_static =            VALUES_STATIC ("tun", "tap", "unknown"),
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+			.get_gtype =                nm_setting_tun_mode_get_type,
+			.min =                      NM_SETTING_TUN_MODE_UNKNOWN + 1,
+			.max =                      G_MAXINT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_TUN_OWNER,
@@ -6505,7 +6048,7 @@ static const NMMetaPropertyInfo *const property_infos_VLAN[] = {
 		.property_alias =               "id",
 		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
 		.prompt =                       N_("VLAN ID (<0-4094>)"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VLAN_FLAGS,
 		.is_cli_option =                TRUE,
@@ -6579,7 +6122,7 @@ static const NMMetaPropertyInfo *const property_infos_VPN[] = {
 		.property_type =                &_pt_gobject_bool,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VPN_TIMEOUT,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	NULL
 };
@@ -6598,7 +6141,7 @@ static const NMMetaPropertyInfo *const property_infos_VXLAN[] = {
 		.property_alias =               "id",
 		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
 		.prompt =                       N_("VXLAN ID"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_LOCAL,
 		.is_cli_option =                TRUE,
@@ -6617,31 +6160,31 @@ static const NMMetaPropertyInfo *const property_infos_VXLAN[] = {
 		.is_cli_option =                TRUE,
 		.property_alias =               "source-port-min",
 		.prompt =                       N_("Minimum source port [0]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_SOURCE_PORT_MAX,
 		.is_cli_option =                TRUE,
 		.property_alias =               "source-port-max",
 		.prompt =                       N_("Maximum source port [0]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_DESTINATION_PORT,
 		.is_cli_option =                TRUE,
 		.property_alias =               "destination-port",
 		.prompt =                       N_("Destination port [8472]"),
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_TOS,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_TTL,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_AGEING,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_LIMIT,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_VXLAN_LEARNING,
 		.property_type =                &_pt_gobject_bool,
@@ -6691,7 +6234,7 @@ static const NMMetaPropertyInfo *const property_infos_WIRED[] = {
 		.property_type =                &_pt_gobject_readonly,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRED_SPEED,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRED_DUPLEX,
 		.property_type =                &_pt_gobject_string,
@@ -6761,9 +6304,27 @@ static const NMMetaPropertyInfo *const property_infos_WIRED[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRED_WAKE_ON_LAN,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_wired_wake_on_lan,
-			.set_fcn =                  _set_fcn_wired_wake_on_lan,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_wired_wake_on_lan_get_type,
+				.value_infos =          ENUM_VALUE_INFOS (
+					{
+						.value = NM_SETTING_WIRED_WAKE_ON_LAN_NONE,
+						.nick = "none",
+					},
+					{
+						.value = NM_SETTING_WIRED_WAKE_ON_LAN_NONE,
+						.nick = "disable",
+					},
+					{
+						.value = NM_SETTING_WIRED_WAKE_ON_LAN_NONE,
+						.nick = "disabled",
+					}
+				),
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRED_WAKE_ON_LAN_PASSWORD,
@@ -6846,9 +6407,13 @@ static const NMMetaPropertyInfo *const property_infos_WIRELESS[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_MAC_ADDRESS_RANDOMIZATION,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_wireless_mac_address_randomization,
-			.set_fcn =                  _set_fcn_wireless_mac_address_randomization,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.get_gtype =            nm_setting_mac_randomization_get_type,
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_MTU,
@@ -6888,7 +6453,7 @@ static const NMMetaPropertyInfo *const property_infos_WIRELESS_SECURITY[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_SECURITY_WEP_TX_KEYIDX,
-		.property_type =                &_pt_gobject_uint,
+		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_SECURITY_AUTH_ALG,
 		.property_type =                &_pt_gobject_string,
@@ -6972,16 +6537,20 @@ static const NMMetaPropertyInfo *const property_infos_WIRELESS_SECURITY[] = {
 		.describe_message =
 		    N_("Enter the type of WEP keys. The accepted values are: "
 		       "0 or unknown, 1 or key, and 2 or passphrase.\n"),
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_wireless_security_wep_key_type,
-			.set_fcn =                  _set_fcn_wireless_security_wep_key_type,
+		.property_type =                &_pt_gobject_enum,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA (
+			PROPERTY_TYP_DATA_SUBTYPE (gobject_enum,
+				.pre_set_notify =       _gobject_enum_pre_set_notify_fcn_wireless_security_wep_key_type,
+			),
+			.typ_flags =                  NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PARSABLE_TEXT
+			                            | NM_META_PROPERTY_TYP_FLAG_ENUM_GET_PRETTY_TEXT,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_SECURITY_PSK,
 		.is_secret =                    TRUE,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_gobject,
-			.set_fcn =                  _set_fcn_wireless_security_psk,
+		.property_type =                &_pt_gobject_string,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_string,
+			.validate_fcn =             _validate_fcn_wireless_security_psk,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_WIRELESS_SECURITY_PSK_FLAGS,
@@ -7209,6 +6778,7 @@ const NMMetaSettingInfoEditor nm_meta_setting_infos_editor[] = {
 		.valid_parts = NM_META_SETTING_VALID_PARTS (
 			NM_META_SETTING_VALID_PART_ITEM (CONNECTION,            TRUE),
 			NM_META_SETTING_VALID_PART_ITEM (BLUETOOTH,             TRUE),
+			NM_META_SETTING_VALID_PART_ITEM (BRIDGE,                FALSE),
 		),
 		.setting_init_fcn =             _setting_init_fcn_bluetooth,
 	),

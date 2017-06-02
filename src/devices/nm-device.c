@@ -3291,13 +3291,25 @@ gboolean
 nm_device_notify_component_added (NMDevice *self, GObject *component)
 {
 	NMDeviceClass *klass;
+	NMDevicePrivate *priv;
 
 	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
-	g_return_val_if_fail (G_IS_OBJECT (component), FALSE);
 
+	priv = NM_DEVICE_GET_PRIVATE (self);
 	klass = NM_DEVICE_GET_CLASS (self);
+
+	if (priv->state == NM_DEVICE_STATE_DISCONNECTED) {
+		/* A device could have stayed disconnected because it would
+		 * want to register with a network server that now become
+		 * available. */
+		nm_device_recheck_available_connections (self);
+		if (g_hash_table_size (priv->available_connections) > 0)
+			nm_device_emit_recheck_auto_activate (self);
+	}
+
 	if (klass->component_added)
 		return klass->component_added (self, component);
+
 	return FALSE;
 }
 
@@ -5389,15 +5401,6 @@ dhcp4_cleanup (NMDevice *self, CleanupType cleanup_type, gboolean release)
 	}
 }
 
-static void
-_ip4_config_merge_default (gpointer value, gpointer user_data)
-{
-	NMIP4Config *src = (NMIP4Config *) value;
-	NMIP4Config *dst = (NMIP4Config *) user_data;
-
-	nm_ip4_config_merge (dst, src, NM_IP_CONFIG_MERGE_DEFAULT);
-}
-
 static gboolean
 ip4_config_merge_and_apply (NMDevice *self,
                             NMIP4Config *config,
@@ -5415,6 +5418,7 @@ ip4_config_merge_and_apply (NMDevice *self,
 	gboolean ignore_auto_routes = FALSE;
 	gboolean ignore_auto_dns = FALSE;
 	gboolean auto_method = FALSE;
+	GSList *iter;
 
 	/* Merge all the configs into the composite config */
 	if (config) {
@@ -5456,7 +5460,8 @@ ip4_config_merge_and_apply (NMDevice *self,
 		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
 	}
 
-	g_slist_foreach (priv->vpn4_configs, _ip4_config_merge_default, composite);
+	for (iter = priv->vpn4_configs; iter; iter = iter->next)
+		nm_ip4_config_merge (composite, iter->data, NM_IP_CONFIG_MERGE_DEFAULT);
 
 	if (priv->ext_ip4_config)
 		nm_ip4_config_merge (composite, priv->ext_ip4_config, NM_IP_CONFIG_MERGE_DEFAULT);
@@ -5851,66 +5856,63 @@ nm_device_dhcp4_renew (NMDevice *self, gboolean release)
 static GHashTable *shared_ips = NULL;
 
 static void
-release_shared_ip (gpointer data)
+shared_ip_release (gpointer data)
 {
 	g_hash_table_remove (shared_ips, data);
-}
-
-static gboolean
-reserve_shared_ip (NMDevice *self, NMSettingIPConfig *s_ip4, NMPlatformIP4Address *address)
-{
-	if (G_UNLIKELY (shared_ips == NULL))
-		shared_ips = g_hash_table_new (g_direct_hash, g_direct_equal);
-
-	memset (address, 0, sizeof (*address));
-
-	if (s_ip4 && nm_setting_ip_config_get_num_addresses (s_ip4)) {
-		/* Use the first user-supplied address */
-		NMIPAddress *user = nm_setting_ip_config_get_address (s_ip4, 0);
-		in_addr_t a;
-
-		g_assert (user);
-		nm_ip_address_get_address_binary (user, &a);
-		nm_platform_ip4_address_set_addr (address, a, nm_ip_address_get_prefix (user));
-	} else {
-		/* Find an unused address in the 10.42.x.x range */
-		guint32 start = (guint32) ntohl (0x0a2a0001); /* 10.42.0.1 */
-		guint32 count = 0;
-
-		while (g_hash_table_lookup (shared_ips, GUINT_TO_POINTER (start + count))) {
-			count += ntohl (0x100);
-			if (count > ntohl (0xFE00)) {
-				_LOGE (LOGD_SHARING, "ran out of shared IP addresses!");
-				return FALSE;
-			}
-		}
-		nm_platform_ip4_address_set_addr (address, start + count, 24);
-		g_hash_table_add (shared_ips, GUINT_TO_POINTER (address->address));
-	}
-
-	return TRUE;
+	if (!g_hash_table_size (shared_ips))
+		g_clear_pointer (&shared_ips, g_hash_table_unref);
 }
 
 static NMIP4Config *
 shared4_new_config (NMDevice *self, NMConnection *connection)
 {
 	NMIP4Config *config = NULL;
-	NMPlatformIP4Address address;
+	gboolean is_generated = FALSE;
+	NMSettingIPConfig *s_ip4;
+	NMPlatformIP4Address address = {
+		.addr_source = NM_IP_CONFIG_SOURCE_SHARED,
+	};
 
-	g_return_val_if_fail (self != NULL, NULL);
+	g_return_val_if_fail (self, NULL);
+	g_return_val_if_fail (connection, NULL);
 
-	if (!reserve_shared_ip (self, nm_connection_get_setting_ip4_config (connection), &address))
-		return NULL;
+	s_ip4 = nm_connection_get_setting_ip4_config (connection);
+	if (s_ip4 && nm_setting_ip_config_get_num_addresses (s_ip4)) {
+		/* Use the first user-supplied address */
+		NMIPAddress *user = nm_setting_ip_config_get_address (s_ip4, 0);
+		in_addr_t a;
+
+		nm_ip_address_get_address_binary (user, &a);
+		nm_platform_ip4_address_set_addr (&address, a, nm_ip_address_get_prefix (user));
+	} else {
+		/* Find an unused address in the 10.42.x.x range */
+		guint32 start = (guint32) ntohl (0x0a2a0001); /* 10.42.0.1 */
+		guint32 count = 0;
+
+		if (G_UNLIKELY (!shared_ips))
+			shared_ips = g_hash_table_new (g_direct_hash, g_direct_equal);
+		else {
+			while (g_hash_table_lookup (shared_ips, GUINT_TO_POINTER (start + count))) {
+				count += ntohl (0x100);
+				if (count > ntohl (0xFE00)) {
+					_LOGE (LOGD_SHARING, "ran out of shared IP addresses!");
+					return FALSE;
+				}
+			}
+		}
+		nm_platform_ip4_address_set_addr (&address, start + count, 24);
+		g_hash_table_add (shared_ips, GUINT_TO_POINTER (address.address));
+		is_generated = TRUE;
+	}
 
 	config = nm_ip4_config_new (nm_device_get_ip_ifindex (self));
-	address.addr_source = NM_IP_CONFIG_SOURCE_SHARED;
 	nm_ip4_config_add_address (config, &address);
-
-	/* Remove the address lock when the object gets disposed */
-	g_object_set_qdata_full (G_OBJECT (config), NM_CACHED_QUARK ("shared-ip"),
-	                        GUINT_TO_POINTER (address.address),
-	                        release_shared_ip);
-
+	if (is_generated) {
+		/* Remove the address lock when the object gets disposed */
+		g_object_set_qdata_full (G_OBJECT (config), NM_CACHED_QUARK ("shared-ip"),
+		                         GUINT_TO_POINTER (address.address),
+		                         shared_ip_release);
+	}
 	return config;
 }
 
@@ -6125,15 +6127,6 @@ dhcp6_cleanup (NMDevice *self, CleanupType cleanup_type, gboolean release)
 	}
 }
 
-static void
-_ip6_config_merge_default (gpointer value, gpointer user_data)
-{
-	NMIP6Config *src = (NMIP6Config *) value;
-	NMIP6Config *dst = (NMIP6Config *) user_data;
-
-	nm_ip6_config_merge (dst, src, NM_IP_CONFIG_MERGE_DEFAULT);
-}
-
 static gboolean
 ip6_config_merge_and_apply (NMDevice *self,
                             gboolean commit)
@@ -6150,6 +6143,7 @@ ip6_config_merge_and_apply (NMDevice *self,
 	gboolean ignore_auto_dns = FALSE;
 	gboolean auto_method = FALSE;
 	const char *token = NULL;
+	GSList *iter;
 
 	/* Apply ignore-auto-routes and ignore-auto-dns settings */
 	connection = nm_device_get_applied_connection (self);
@@ -6172,7 +6166,6 @@ ip6_config_merge_and_apply (NMDevice *self,
 		}
 	}
 
-	/* If no config was passed in, create a new one */
 	composite = nm_ip6_config_new (nm_device_get_ip_ifindex (self));
 	nm_ip6_config_set_privacy (composite,
 	                           priv->ndisc ?
@@ -6206,7 +6199,8 @@ ip6_config_merge_and_apply (NMDevice *self,
 		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
 	}
 
-	g_slist_foreach (priv->vpn6_configs, _ip6_config_merge_default, composite);
+	for (iter = priv->vpn6_configs; iter; iter = iter->next)
+		nm_ip6_config_merge (composite, iter->data, NM_IP_CONFIG_MERGE_DEFAULT);
 
 	if (priv->ext_ip6_config)
 		nm_ip6_config_merge (composite, priv->ext_ip6_config, NM_IP_CONFIG_MERGE_DEFAULT);
@@ -7702,7 +7696,7 @@ act_stage3_ip6_config_start (NMDevice *self,
 	nm_platform_process_events (nm_device_get_platform (self));
 	g_clear_object (&priv->ext_ip6_config_captured);
 	priv->ext_ip6_config_captured = nm_ip6_config_capture (nm_device_get_platform (self),
-	                                                       nm_device_get_ifindex (self),
+	                                                       nm_device_get_ip_ifindex (self),
 	                                                       FALSE,
 	                                                       NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN);
 
@@ -8400,8 +8394,7 @@ dad6_get_pending_addresses (NMDevice *self)
 				addr = nm_ip6_config_get_address (confs[i], j);
 				pl_addr = nm_platform_ip6_address_get (nm_device_get_platform (self),
 				                                       ifindex,
-				                                       addr->address,
-				                                       addr->plen);
+				                                       addr->address);
 				if (   pl_addr
 				    && NM_FLAGS_HAS (pl_addr->n_ifa_flags, IFA_F_TENTATIVE)
 				    && !NM_FLAGS_HAS (pl_addr->n_ifa_flags, IFA_F_DADFAILED)
@@ -10534,29 +10527,12 @@ capture_lease_config (NMDevice *self,
 }
 
 static void
-_ip4_config_intersect (gpointer value, gpointer user_data)
-{
-	NMIP4Config *dst = (NMIP4Config *) value;
-	NMIP4Config *src = (NMIP4Config *) user_data;
-
-	nm_ip4_config_intersect (dst, src);
-}
-
-static void
-_ip4_config_subtract (gpointer value, gpointer user_data)
-{
-	NMIP4Config *dst = (NMIP4Config *) user_data;
-	NMIP4Config *src = (NMIP4Config *) value;
-
-	nm_ip4_config_subtract (dst, src);
-}
-
-static void
 update_ip4_config (NMDevice *self, gboolean initial)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	int ifindex;
 	gboolean capture_resolv_conf;
+	GSList *iter;
 
 	/* If a commit is scheduled, this function would potentially interfere with
 	 * it changing IP configurations before they are applied. Postpone the
@@ -10603,11 +10579,10 @@ update_ip4_config (NMDevice *self, gboolean initial)
 			nm_ip4_config_intersect (priv->con_ip4_config, priv->ext_ip4_config);
 		if (priv->dev_ip4_config)
 			nm_ip4_config_intersect (priv->dev_ip4_config, priv->ext_ip4_config);
-
-		g_slist_foreach (priv->vpn4_configs, _ip4_config_intersect, priv->ext_ip4_config);
-
 		if (priv->wwan_ip4_config)
 			nm_ip4_config_intersect (priv->wwan_ip4_config, priv->ext_ip4_config);
+		for (iter = priv->vpn4_configs; iter; iter = iter->next)
+			nm_ip4_config_intersect (iter->data, priv->ext_ip4_config);
 
 		/* Remove parts from ext_ip4_config to only contain the information that
 		 * was configured externally -- we already have the same configuration from
@@ -10616,32 +10591,13 @@ update_ip4_config (NMDevice *self, gboolean initial)
 			nm_ip4_config_subtract (priv->ext_ip4_config, priv->con_ip4_config);
 		if (priv->dev_ip4_config)
 			nm_ip4_config_subtract (priv->ext_ip4_config, priv->dev_ip4_config);
-
-		g_slist_foreach (priv->vpn4_configs, _ip4_config_subtract, priv->ext_ip4_config);
-
 		if (priv->wwan_ip4_config)
 			nm_ip4_config_subtract (priv->ext_ip4_config, priv->wwan_ip4_config);
+		for (iter = priv->vpn4_configs; iter; iter = iter->next)
+			nm_ip4_config_subtract (priv->ext_ip4_config, iter->data);
 
 		ip4_config_merge_and_apply (self, NULL, FALSE);
 	}
-}
-
-static void
-_ip6_config_intersect (gpointer value, gpointer user_data)
-{
-	NMIP6Config *dst = (NMIP6Config *) value;
-	NMIP6Config *src = (NMIP6Config *) user_data;
-
-	nm_ip6_config_intersect (dst, src);
-}
-
-static void
-_ip6_config_subtract (gpointer value, gpointer user_data)
-{
-	NMIP6Config *dst = (NMIP6Config *) user_data;
-	NMIP6Config *src = (NMIP6Config *) value;
-
-	nm_ip6_config_subtract (dst, src);
 }
 
 static void
@@ -10650,6 +10606,7 @@ update_ip6_config (NMDevice *self, gboolean initial)
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	int ifindex;
 	gboolean capture_resolv_conf;
+	GSList *iter;
 
 	/* If a commit is scheduled, this function would potentially interfere with
 	 * it changing IP configurations before they are applied. Postpone the
@@ -10692,7 +10649,8 @@ update_ip6_config (NMDevice *self, gboolean initial)
 			nm_ip6_config_intersect (priv->dhcp6.ip6_config, priv->ext_ip6_config);
 		if (priv->wwan_ip6_config)
 			nm_ip6_config_intersect (priv->wwan_ip6_config, priv->ext_ip6_config);
-		g_slist_foreach (priv->vpn6_configs, _ip6_config_intersect, priv->ext_ip6_config);
+		for (iter = priv->vpn6_configs; iter; iter = iter->next)
+			nm_ip6_config_intersect (iter->data, priv->ext_ip6_config);
 
 		/* Remove parts from ext_ip6_config to only contain the information that
 		 * was configured externally -- we already have the same configuration from
@@ -10705,7 +10663,8 @@ update_ip6_config (NMDevice *self, gboolean initial)
 			nm_ip6_config_subtract (priv->ext_ip6_config, priv->dhcp6.ip6_config);
 		if (priv->wwan_ip6_config)
 			nm_ip6_config_subtract (priv->ext_ip6_config, priv->wwan_ip6_config);
-		g_slist_foreach (priv->vpn6_configs, _ip6_config_subtract, priv->ext_ip6_config);
+		for (iter = priv->vpn6_configs; iter; iter = iter->next)
+			nm_ip6_config_subtract (priv->ext_ip6_config, iter->data);
 
 		ip6_config_merge_and_apply (self, FALSE);
 	}
@@ -12040,11 +11999,6 @@ nm_device_cleanup (NMDevice *self, NMDeviceStateReason reason, CleanupType clean
 		/* master: release slaves */
 		nm_device_master_release_slaves (self);
 
-		/* slave: mark no longer enslaved */
-		if (   priv->master
-		    && nm_platform_link_get_master (nm_device_get_platform (self), priv->ifindex) <= 0)
-			nm_device_master_release_one_slave (priv->master, self, FALSE, NM_DEVICE_STATE_REASON_CONNECTION_ASSUMED);
-
 		/* Take out any entries in the routing table and any IP address the device had. */
 		ifindex = nm_device_get_ip_ifindex (self);
 		if (ifindex > 0) {
@@ -12052,6 +12006,11 @@ nm_device_cleanup (NMDevice *self, NMDeviceStateReason reason, CleanupType clean
 			nm_platform_address_flush (nm_device_get_platform (self), ifindex);
 		}
 	}
+
+	/* slave: mark no longer enslaved */
+	if (   priv->master
+	    && nm_platform_link_get_master (nm_device_get_platform (self), priv->ifindex) <= 0)
+		nm_device_master_release_one_slave (priv->master, self, FALSE, NM_DEVICE_STATE_REASON_CONNECTION_ASSUMED);
 
 	if (priv->lldp_listener)
 		nm_lldp_listener_stop (priv->lldp_listener);
@@ -12393,24 +12352,20 @@ _set_state_full (NMDevice *self,
 	if (   (priv->state == state)
 	    && (   state != NM_DEVICE_STATE_UNAVAILABLE
 	        || !priv->firmware_missing)) {
-		_LOGD (LOGD_DEVICE, "state change: %s -> %s (reason '%s') [%d %d %d]%s",
+		_LOGD (LOGD_DEVICE, "state change: %s -> %s (reason '%s', internal state '%s'%s)",
 		       state_to_string (old_state),
 		       state_to_string (state),
 		       reason_to_string (reason),
-		       old_state,
-		       state,
-		       reason,
-		       priv->firmware_missing ? " (missing firmware)" : "");
+		       _sys_iface_state_to_str (priv->sys_iface_state),
+		       priv->firmware_missing ? ", missing firmware" : "");
 		return;
 	}
 
-	_LOGI (LOGD_DEVICE, "state change: %s -> %s (reason '%s') [%d %d %d]",
+	_LOGI (LOGD_DEVICE, "state change: %s -> %s (reason '%s', internal state '%s')",
 	       state_to_string (old_state),
 	       state_to_string (state),
 	       reason_to_string (reason),
-	       old_state,
-	       state,
-	       reason);
+	       _sys_iface_state_to_str (priv->sys_iface_state));
 
 	priv->in_state_changed = TRUE;
 
@@ -13863,9 +13818,14 @@ set_property (GObject *object, guint prop_id,
 			NMDeviceStateReason reason;
 
 			managed = g_value_get_boolean (value);
-			if (managed)
+			if (managed) {
 				reason = NM_DEVICE_STATE_REASON_CONNECTION_ASSUMED;
-			else {
+				if (NM_IN_SET_TYPED (NMDeviceSysIfaceState,
+				                     priv->sys_iface_state,
+				                     NM_DEVICE_SYS_IFACE_STATE_EXTERNAL,
+				                     NM_DEVICE_SYS_IFACE_STATE_REMOVED))
+					nm_device_sys_iface_state_set (self, NM_DEVICE_SYS_IFACE_STATE_ASSUME);
+			} else {
 				reason = NM_DEVICE_STATE_REASON_REMOVED;
 				nm_device_sys_iface_state_set (self, NM_DEVICE_SYS_IFACE_STATE_REMOVED);
 			}

@@ -54,7 +54,7 @@
  **/
 
 G_DEFINE_TYPE_WITH_CODE (NMSettingWirelessSecurity, nm_setting_wireless_security, NM_TYPE_SETTING,
-                         _nm_register_setting (WIRELESS_SECURITY, 2))
+                         _nm_register_setting (WIRELESS_SECURITY, 3))
 NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_WIRELESS_SECURITY)
 
 #define NM_SETTING_WIRELESS_SECURITY_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_WIRELESS_SECURITY, NMSettingWirelessSecurityPrivate))
@@ -1069,7 +1069,7 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 		g_set_error (error,
 		             NM_CONNECTION_ERROR,
 		             NM_CONNECTION_ERROR_INVALID_PROPERTY,
-		             _("'%s' can only be used with '%s=%s or '%s=%s'"),
+		             _("'%s' can only be used with '%s=%s' or '%s=%s'"),
 		             priv->pmf == NM_SETTING_WIRELESS_SECURITY_PMF_OPTIONAL ? "optional" : "required",
 		             NM_SETTING_WIRELESS_SECURITY_KEY_MGMT, "wpa-eap",
 		             NM_SETTING_WIRELESS_SECURITY_KEY_MGMT, "wpa-psk");

@@ -61,7 +61,7 @@
  **/
 
 G_DEFINE_TYPE_WITH_CODE (NMSetting8021x, nm_setting_802_1x, NM_TYPE_SETTING,
-                         _nm_register_setting (802_1X, 2))
+                         _nm_register_setting (802_1X, 3))
 NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_802_1X)
 
 #define NM_SETTING_802_1X_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_802_1X, NMSetting8021xPrivate))
@@ -4174,7 +4174,7 @@ nm_setting_802_1x_class_init (NMSetting8021xClass *setting_class)
 	 *
 	 * Specifies authentication flags to use in "phase 1" outer
 	 * authentication using #NMSetting8021xAuthFlags options.
-	 * The invidual TLS versions can be explicitly disabled. If a certain
+	 * The individual TLS versions can be explicitly disabled. If a certain
 	 * TLS disable flag is not set, it is up to the supplicant to allow
 	 * or forbid it. The TLS options map to tls_disable_tlsv1_x settings.
 	 * See the wpa_supplicant documentation for more details.

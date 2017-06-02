@@ -301,7 +301,7 @@ usage_connection_add (void)
 	              "                  [parent <ifname>]\n"
 	              "                  [p-key <IPoIB P_Key>]\n\n"
 	              "    bluetooth:    [addr <bluetooth address>]\n"
-	              "                  [bt-type panu|dun-gsm|dun-cdma]\n\n"
+	              "                  [bt-type panu|nap|dun-gsm|dun-cdma]\n\n"
 	              "    vlan:         dev <parent device (connection UUID, ifname, or MAC)>\n"
 	              "                  id <VLAN ID>\n"
 	              "                  [flags <VLAN flags>]\n"
@@ -2095,12 +2095,11 @@ check_activated (ActivateConnectionInfo *info)
 	NmCli *nmc = info->nmc;
 	NMDevice *device = info->device;
 	NMActiveConnection *active = info->active;
-	NMActiveConnectionState ac_state;
 	NMActiveConnectionStateReason ac_reason;
-	NMDeviceState dev_state;
-	NMDeviceStateReason dev_reason;
+	NMDeviceState dev_state = NM_DEVICE_STATE_UNKNOWN;
+	NMDeviceStateReason dev_reason = NM_DEVICE_STATE_REASON_UNKNOWN;
+	const char *reason;
 
-	ac_state = nm_active_connection_get_state (active);
 	ac_reason = nm_active_connection_get_state_reason (active);
 
 	if (device) {
@@ -2108,30 +2107,50 @@ check_activated (ActivateConnectionInfo *info)
 		dev_reason = nm_device_get_state_reason (device);
 	}
 
-	if (ac_state == NM_ACTIVE_CONNECTION_STATE_ACTIVATED) {
+	switch (nm_active_connection_get_state (active)) {
+
+	case NM_ACTIVE_CONNECTION_STATE_ACTIVATED:
 		if (nmc->nmc_config.print_output == NMC_PRINT_PRETTY)
 			nmc_terminal_erase_line ();
 		g_print (_("Connection successfully activated (D-Bus active path: %s)\n"),
 		         nm_object_get_path (NM_OBJECT (active)));
 		activate_connection_info_finish (info);
-	} else if (ac_state == NM_ACTIVE_CONNECTION_STATE_DEACTIVATED) {
-		if (device && ac_reason == NM_ACTIVE_CONNECTION_STATE_REASON_DEVICE_DISCONNECTED) {
-			if (dev_state == NM_DEVICE_STATE_FAILED || dev_state == NM_DEVICE_STATE_DISCONNECTED) {
-				g_string_printf (nmc->return_text, _("Error: Connection activation failed: %s"),
-				                 nmc_device_reason_to_string (dev_reason));
-				nmc->return_value = NMC_RESULT_ERROR_CON_ACTIVATION;
-				activate_connection_info_finish (info);
-			} else {
-				/* Just wait for the device to go failed. We'll get a better error message. */
-				return;
-			}
+		break;
+
+	case NM_ACTIVE_CONNECTION_STATE_DEACTIVATED:
+
+		if (   !device
+		    || ac_reason != NM_ACTIVE_CONNECTION_STATE_REASON_DEVICE_DISCONNECTED
+		    || nm_device_get_active_connection (device) != active) {
+			/* (1)
+			 * - we have no device,
+			 * - or, @ac_reason is specific
+			 * - or, @device no longer references the current @active
+			 * >> we complete with @ac_reason. */
+			reason = active_connection_state_reason_to_string (ac_reason);
+		} else if (   dev_state <= NM_DEVICE_STATE_DISCONNECTED
+		           || dev_state >= NM_DEVICE_STATE_FAILED) {
+			/* (2)
+			 * - not (1)
+			 * - and, the device is no longer in an activated state,
+			 * >> we complete with @dev_reason. */
+			reason = nmc_device_reason_to_string (dev_reason);
 		} else {
+			/* (3)
+			 * we wait for the device go disconnect. We will get a better
+			 * failure reason from the device (2). */
+			reason = NULL;
+		}
+
+		if (reason) {
 			g_string_printf (nmc->return_text, _("Error: Connection activation failed: %s"),
-			                 active_connection_state_reason_to_string (ac_reason));
+			                 reason);
 			nmc->return_value = NMC_RESULT_ERROR_CON_ACTIVATION;
 			activate_connection_info_finish (info);
 		}
-	} else if (ac_state == NM_ACTIVE_CONNECTION_STATE_ACTIVATING) {
+		break;
+
+	case NM_ACTIVE_CONNECTION_STATE_ACTIVATING:
 		/* activating master connection does not automatically activate any slaves, so their
 		 * active connection state will not progress beyond ACTIVATING state.
 		 * Monitor the device instead. */
@@ -2147,14 +2166,18 @@ check_activated (ActivateConnectionInfo *info)
 		    && (   NM_IS_DEVICE_BOND (device)
 		        || NM_IS_DEVICE_TEAM (device)
 		        || NM_IS_DEVICE_BRIDGE (device))
-	            && dev_state >= NM_DEVICE_STATE_IP_CONFIG
-	            && dev_state <= NM_DEVICE_STATE_ACTIVATED) {
+		    && dev_state >= NM_DEVICE_STATE_IP_CONFIG
+		    && dev_state <= NM_DEVICE_STATE_ACTIVATED) {
 			if (nmc->nmc_config.print_output == NMC_PRINT_PRETTY)
 				nmc_terminal_erase_line ();
 			g_print (_("Connection successfully activated (master waiting for slaves) (D-Bus active path: %s)\n"),
 			          nm_object_get_path (NM_OBJECT (active)));
 			activate_connection_info_finish (info);
 		}
+		break;
+
+	default:
+		break;
 	}
 }
 
@@ -3746,7 +3769,7 @@ gen_func_bool_values_l10n (const char *text, int state)
 static char *
 gen_func_bt_type (const char *text, int state)
 {
-	const char *words[] = { "panu", "dun-gsm", "dun-cdma", NULL };
+	const char *words[] = { "panu", "nap", "dun-gsm", "dun-cdma", NULL };
 	return nmc_rl_gen_func_basic (text, state, words);
 }
 
@@ -3968,13 +3991,14 @@ set_bluetooth_type (NmCli *nmc, NMConnection *con, const OptionInfo *option, con
 		value = NM_SETTING_BLUETOOTH_TYPE_DUN;
 		setting = nm_setting_cdma_new ();
 		nm_connection_add_setting (con, setting);
-	} else if (!strcmp (value, NM_SETTING_BLUETOOTH_TYPE_PANU)) {
+	} else if (!strcmp (value, NM_SETTING_BLUETOOTH_TYPE_PANU) || !strcmp (value, NM_SETTING_BLUETOOTH_TYPE_NAP)) {
 		/* no op */
 	} else {
 		g_set_error (error, NMCLI_ERROR, NMC_RESULT_ERROR_USER_INPUT,
-		             _("Error: 'bt-type': '%s' not valid; use [%s, %s (%s), %s]."),
-		             value, NM_SETTING_BLUETOOTH_TYPE_PANU, NM_SETTING_BLUETOOTH_TYPE_DUN,
-		             NM_SETTING_BLUETOOTH_TYPE_DUN"-gsm", NM_SETTING_BLUETOOTH_TYPE_DUN"-cdma");
+		             _("Error: 'bt-type': '%s' not valid; use [%s, %s, %s (%s), %s]."),
+		             value, NM_SETTING_BLUETOOTH_TYPE_PANU, NM_SETTING_BLUETOOTH_TYPE_NAP,
+		             NM_SETTING_BLUETOOTH_TYPE_DUN, NM_SETTING_BLUETOOTH_TYPE_DUN"-gsm",
+		             NM_SETTING_BLUETOOTH_TYPE_DUN"-cdma");
 		return FALSE;
 	}
 

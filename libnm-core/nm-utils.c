@@ -3896,8 +3896,8 @@ _nm_utils_inet6_is_token (const struct in6_addr *in6addr)
 gboolean
 nm_utils_check_virtual_device_compatibility (GType virtual_type, GType other_type)
 {
-	g_return_val_if_fail (_nm_setting_type_is_base_type (virtual_type), FALSE);
-	g_return_val_if_fail (_nm_setting_type_is_base_type (other_type), FALSE);
+	g_return_val_if_fail (_nm_setting_type_get_base_type_priority (virtual_type), FALSE);
+	g_return_val_if_fail (_nm_setting_type_get_base_type_priority (other_type), FALSE);
 
 	if (virtual_type == NM_TYPE_SETTING_BOND) {
 		return (   other_type == NM_TYPE_SETTING_INFINIBAND
@@ -4317,7 +4317,7 @@ nm_utils_is_json_object (const char *str, GError **error)
 		return FALSE;
 	}
 
-	json = json_loads (str, 0, &jerror);
+	json = json_loads (str, JSON_REJECT_DUPLICATES, &jerror);
 	if (!json) {
 		g_set_error (error,
 		             NM_CONNECTION_ERROR,
@@ -4369,9 +4369,9 @@ _nm_utils_team_config_equal (const char *conf1,
 		return TRUE;
 
 	/* A NULL configuration is equivalent to default value '{}' */
-	json1 = json_loads (conf1 ?: "{}", 0, &jerror);
+	json1 = json_loads (conf1 ?: "{}", JSON_REJECT_DUPLICATES, &jerror);
 	if (json1)
-		json2 = json_loads (conf2 ?: "{}", 0, &jerror);
+		json2 = json_loads (conf2 ?: "{}", JSON_REJECT_DUPLICATES, &jerror);
 
 	if (!json1 || !json2) {
 		ret = FALSE;

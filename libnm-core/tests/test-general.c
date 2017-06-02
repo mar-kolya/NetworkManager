@@ -3492,7 +3492,7 @@ _test_connection_normalize_type_normalizable_setting (const char *type,
 
 	base_type = nm_setting_lookup_type (type);
 	g_assert (base_type != G_TYPE_INVALID);
-	g_assert (_nm_setting_type_is_base_type (base_type));
+	g_assert (_nm_setting_type_get_base_type_priority (base_type));
 
 	con = nmtst_create_minimal_connection (id, NULL, NULL, &s_con);
 
@@ -3522,7 +3522,7 @@ _test_connection_normalize_type_unnormalizable_setting (const char *type)
 
 	base_type = nm_setting_lookup_type (type);
 	g_assert (base_type != G_TYPE_INVALID);
-	g_assert (_nm_setting_type_is_base_type (base_type));
+	g_assert (_nm_setting_type_get_base_type_priority (base_type));
 
 	con = nmtst_create_minimal_connection (id, NULL, NULL, &s_con);
 
@@ -3545,7 +3545,7 @@ _test_connection_normalize_type_normalizable_type (const char *type,
 
 	base_type = nm_setting_lookup_type (type);
 	g_assert (base_type != G_TYPE_INVALID);
-	g_assert (_nm_setting_type_is_base_type (base_type));
+	g_assert (_nm_setting_type_get_base_type_priority (base_type));
 
 	con = nmtst_create_minimal_connection (id, NULL, NULL, &s_con);
 
@@ -3558,7 +3558,7 @@ _test_connection_normalize_type_normalizable_type (const char *type,
 		nm_connection_add_setting (con, s_base);
 	}
 
-	g_assert (!nm_connection_get_connection_type (con));
+	g_assert (!nm_setting_connection_get_connection_type (s_con));
 	g_assert (nm_connection_get_setting_by_name (con, type) == s_base);
 
 	nmtst_assert_connection_verifies_after_normalization (con, NM_CONNECTION_ERROR, NM_CONNECTION_ERROR_MISSING_PROPERTY);
@@ -4942,14 +4942,23 @@ enum TEST_IS_POWER_OF_TWP_ENUM_UNSIGNED_64 {
 		typeof (x) x1 = (x); \
 		type x2 = (type) x1; \
 		\
-		if (((typeof (x1)) x2) == x1 && (x2 > 0 || x2 == 0)) { \
+		g_assert_cmpint (expect, ==, nm_utils_is_power_of_two (x1)); \
+		if (   ((typeof (x1)) x2) == x1 \
+		    && ((typeof (x2)) x1) == x2 \
+		    && x2 > 0) { \
 			/* x2 equals @x, and is positive. Compare to @expect */ \
 			g_assert_cmpint (expect, ==, nm_utils_is_power_of_two (x2)); \
-		} else if (!(x2 > 0) && !(x2 == 0)) { \
-			/* a (signed) negative value is always FALSE. */ \
-			g_assert_cmpint (FALSE, ==, nm_utils_is_power_of_two (x2));\
+		} else if (!(x2 > 0)) { \
+			/* a non positive value is always FALSE. */ \
+			g_assert_cmpint (FALSE, ==, nm_utils_is_power_of_two (x2)); \
 		} \
-		g_assert_cmpint (expect, ==, nm_utils_is_power_of_two (x1)); \
+		if (x2) { \
+			x2 = -x2; \
+			if (!(x2 > 0)) { \
+				/* for negative values, we return FALSE. */ \
+				g_assert_cmpint (FALSE, ==, nm_utils_is_power_of_two (x2)); \
+			} \
+		} \
 	} G_STMT_END
 
 static void
@@ -4992,7 +5001,7 @@ again:
 			gboolean expect = j == 0;
 			guint64 x = expect ? xyes : xno;
 
-			if (!expect && xno == 0)
+			if (expect && xyes == 0)
 				continue;
 
 			/* check if @x is as @expect, when casted to a certain data type. */
