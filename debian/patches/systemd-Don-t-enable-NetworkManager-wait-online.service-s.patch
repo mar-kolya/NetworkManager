@@ -14,10 +14,10 @@ This way the user can easily disable the service.
  1 file changed, 6 deletions(-)
 
 diff --git a/Makefile.am b/Makefile.am
-index 2488894..4a09c11 100644
+index 72bd241..c1ed9f4 100644
 --- a/Makefile.am
 +++ b/Makefile.am
-@@ -3596,12 +3596,6 @@ data/org.freedesktop.NetworkManager.service: $(srcdir)/data/org.freedesktop.Netw
+@@ -3599,12 +3599,6 @@ data/org.freedesktop.NetworkManager.service: $(srcdir)/data/org.freedesktop.Netw
  
  service_DATA += data/org.freedesktop.NetworkManager.service
  
