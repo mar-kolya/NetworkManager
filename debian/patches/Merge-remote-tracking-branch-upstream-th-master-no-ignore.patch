@@ -1,0 +1,1131 @@
+From: Nikolay Martynov <mar.kolya@gmail.com>
+Date: Fri, 2 Jun 2017 22:06:39 -0400
+Subject: Merge remote-tracking branch
+ 'upstream/th/master-no-ignore-carrier-pr18' into patch-queue/ubuntu/zesty
+
+---
+ clients/common/nm-secret-agent-simple.c            |   9 ++
+ libnm-core/nm-setting-bond.c                       |  29 ++++--
+ libnm-util/nm-setting-bond.c                       |  29 ++++--
+ man/NetworkManager.conf.xml                        |   9 +-
+ src/devices/nm-device-bond.c                       |  23 +----
+ src/devices/nm-device-bridge.c                     |  16 +--
+ src/devices/nm-device-ethernet.c                   |  56 +++++-----
+ src/devices/nm-device.c                            | 115 ++++++++++++---------
+ src/devices/nm-device.h                            |   8 +-
+ src/devices/team/nm-device-team.c                  |  23 +----
+ src/dhcp/tests/test-dhcp-dhclient.c                |  14 +--
+ src/nm-config-data.c                               |  11 +-
+ src/nm-connectivity.c                              |  29 +++---
+ src/settings/nm-settings-connection.c              |  38 +++----
+ .../plugins/ifcfg-rh/tests/test-ifcfg-rh.c         |  19 ++--
+ src/supplicant/nm-supplicant-interface.c           |   8 +-
+ src/supplicant/tests/test-supplicant-config.c      |   2 +-
+ src/tests/test-resolvconf-capture.c                |  30 ++----
+ 18 files changed, 243 insertions(+), 225 deletions(-)
+
+diff --git a/clients/common/nm-secret-agent-simple.c b/clients/common/nm-secret-agent-simple.c
+index 89cf156..97bbf0d 100644
+--- a/clients/common/nm-secret-agent-simple.c
++++ b/clients/common/nm-secret-agent-simple.c
+@@ -576,6 +576,15 @@ request_secrets_from_ui (NMSecretAgentSimpleRequest *request)
+ 		ok = FALSE;
+ 
+ 	if (!ok) {
++		gs_free_error GError *error = NULL;
++
++		error = g_error_new (NM_SECRET_AGENT_ERROR, NM_SECRET_AGENT_ERROR_FAILED,
++		                     "Cannot service a secrets request %s for a %s connection",
++		                     request->request_id,
++		                     nm_connection_get_connection_type (request->connection));
++		request->callback (NM_SECRET_AGENT_OLD (request->self), request->connection,
++		                   NULL, error, request->callback_data);
++		g_hash_table_remove (priv->requests, request->request_id);
+ 		g_ptr_array_unref (secrets);
+ 		return;
+ 	}
+diff --git a/libnm-core/nm-setting-bond.c b/libnm-core/nm-setting-bond.c
+index 18b274a..50540d7 100644
+--- a/libnm-core/nm-setting-bond.c
++++ b/libnm-core/nm-setting-bond.c
+@@ -224,19 +224,34 @@ validate_list (const char *name, const char *value, const BondDefault *def)
+ static gboolean
+ validate_ip (const char *name, const char *value)
+ {
+-	char **ips, **iter;
+-	gboolean success = TRUE;
++	gs_free char *value_clone = NULL;
+ 	struct in_addr addr;
+ 
+ 	if (!value || !value[0])
+ 		return FALSE;
+ 
+-	ips = g_strsplit_set (value, ",", 0);
+-	for (iter = ips; iter && *iter && success; iter++)
+-		success = !!inet_aton (*iter, &addr);
+-	g_strfreev (ips);
++	value_clone = g_strdup (value);
++	value = value_clone;
++	for (;;) {
++		char *eow;
+ 
+-	return success;
++		/* we do not skip over empty words. E.g
++		 * "192.168.1.1," is an error.
++		 *
++		 * ... for no particular reason. */
++
++		eow = strchr (value, ',');
++		if (eow)
++			*eow = '\0';
++
++		if (inet_pton (AF_INET, value, &addr) != 1)
++			return FALSE;
++
++		if (!eow)
++			break;
++		value = eow + 1;
++	}
++	return TRUE;
+ }
+ 
+ static gboolean
+diff --git a/libnm-util/nm-setting-bond.c b/libnm-util/nm-setting-bond.c
+index 8a11bc2..f56cb42 100644
+--- a/libnm-util/nm-setting-bond.c
++++ b/libnm-util/nm-setting-bond.c
+@@ -258,19 +258,34 @@ validate_list (const char *name, const char *value, const BondDefault *def)
+ static gboolean
+ validate_ip (const char *name, const char *value)
+ {
+-	char **ips, **iter;
+-	gboolean success = TRUE;
++	gs_free char *value_clone = NULL;
+ 	struct in_addr addr;
+ 
+ 	if (!value || !value[0])
+ 		return FALSE;
+ 
+-	ips = g_strsplit_set (value, ",", 0);
+-	for (iter = ips; iter && *iter && success; iter++)
+-		success = !!inet_aton (*iter, &addr);
+-	g_strfreev (ips);
++	value_clone = g_strdup (value);
++	value = value_clone;
++	for (;;) {
++		char *eow;
+ 
+-	return success;
++		/* we do not skip over empty words. E.g
++		 * "192.168.1.1," is an error.
++		 *
++		 * ... for no particular reason. */
++
++		eow = strchr (value, ',');
++		if (eow)
++			*eow = '\0';
++
++		if (inet_pton (AF_INET, value, &addr) != 1)
++			return FALSE;
++
++		if (!eow)
++			break;
++		value = eow + 1;
++	}
++	return TRUE;
+ }
+ 
+ static gboolean
+diff --git a/man/NetworkManager.conf.xml b/man/NetworkManager.conf.xml
+index 944c4ab..e0f2b1f 100644
+--- a/man/NetworkManager.conf.xml
++++ b/man/NetworkManager.conf.xml
+@@ -233,7 +233,10 @@ no-auto-default=*
+             if specified (See <xref linkend="ignore-carrier"/>).
+             Otherwise, it is a list of matches to specify for which device
+             carrier should be ignored. See <xref linkend="device-spec"/> for the
+-            syntax how to specify a device.
++            syntax how to specify a device. Note that master types like
++            bond, bridge, and team ignore carrier by default. You can however
++            revert that default using the "except:" specifier (or better,
++            use the per-device setting instead of the deprecated setting).
+           </para>
+         </listitem>
+       </varlistentry>
+@@ -840,6 +843,10 @@ unmanaged=1
+               that NetworkManager will not make use of that information.
+             </para>
+             <para>
++              Master types like bond, bridge and team ignore carrier by default,
++              while other device types react on carrier changes by default.
++            </para>
++            <para>
+               This setting overwrites the deprecated <literal>main.ignore-carrier</literal>
+               setting above.
+             </para>
+diff --git a/src/devices/nm-device-bond.c b/src/devices/nm-device-bond.c
+index 3325c94..411393f 100644
+--- a/src/devices/nm-device-bond.c
++++ b/src/devices/nm-device-bond.c
+@@ -58,24 +58,6 @@ get_generic_capabilities (NMDevice *dev)
+ }
+ 
+ static gboolean
+-is_available (NMDevice *dev, NMDeviceCheckDevAvailableFlags flags)
+-{
+-	return TRUE;
+-}
+-
+-static gboolean
+-check_connection_available (NMDevice *device,
+-                            NMConnection *connection,
+-                            NMDeviceCheckConAvailableFlags flags,
+-                            const char *specific_object)
+-{
+-	/* Connections are always available because the carrier state is determined
+-	 * by the slave carrier states, not the bonds's state.
+-	 */
+-	return TRUE;
+-}
+-
+-static gboolean
+ check_connection_compatible (NMDevice *device, NMConnection *connection)
+ {
+ 	NMSettingBond *s_bond;
+@@ -613,6 +595,7 @@ reapply_connection (NMDevice *device, NMConnection *con_old, NMConnection *con_n
+ static void
+ nm_device_bond_init (NMDeviceBond * self)
+ {
++	nm_assert (nm_device_is_master (NM_DEVICE (self)));
+ }
+ 
+ static void
+@@ -622,10 +605,9 @@ nm_device_bond_class_init (NMDeviceBondClass *klass)
+ 
+ 	NM_DEVICE_CLASS_DECLARE_TYPES (klass, NM_SETTING_BOND_SETTING_NAME, NM_LINK_TYPE_BOND)
+ 
++	parent_class->is_master = TRUE;
+ 	parent_class->get_generic_capabilities = get_generic_capabilities;
+-	parent_class->is_available = is_available;
+ 	parent_class->check_connection_compatible = check_connection_compatible;
+-	parent_class->check_connection_available = check_connection_available;
+ 	parent_class->complete_connection = complete_connection;
+ 
+ 	parent_class->update_connection = update_connection;
+@@ -662,7 +644,6 @@ create_device (NMDeviceFactory *factory,
+ 	                                  NM_DEVICE_TYPE_DESC, "Bond",
+ 	                                  NM_DEVICE_DEVICE_TYPE, NM_DEVICE_TYPE_BOND,
+ 	                                  NM_DEVICE_LINK_TYPE, NM_LINK_TYPE_BOND,
+-	                                  NM_DEVICE_IS_MASTER, TRUE,
+ 	                                  NULL);
+ }
+ 
+diff --git a/src/devices/nm-device-bridge.c b/src/devices/nm-device-bridge.c
+index c281dba..6da55b7 100644
+--- a/src/devices/nm-device-bridge.c
++++ b/src/devices/nm-device-bridge.c
+@@ -106,23 +106,17 @@ get_generic_capabilities (NMDevice *dev)
+ }
+ 
+ static gboolean
+-is_available (NMDevice *dev, NMDeviceCheckDevAvailableFlags flags)
+-{
+-	return TRUE;
+-}
+-
+-static gboolean
+ check_connection_available (NMDevice *device,
+                             NMConnection *connection,
+                             NMDeviceCheckConAvailableFlags flags,
+                             const char *specific_object)
+ {
++	if (!NM_DEVICE_CLASS (nm_device_bridge_parent_class)->check_connection_available (device, connection, flags, specific_object))
++		return FALSE;
++
+ 	if (!bt_network_server_available (connection))
+ 		return FALSE;
+ 
+-	/* Connections are always available because the carrier state is determined
+-	 * by the bridge port carrier states, not the bridge's state.
+-	 */
+ 	return TRUE;
+ }
+ 
+@@ -494,6 +488,7 @@ create_and_realize (NMDevice *device,
+ static void
+ nm_device_bridge_init (NMDeviceBridge * self)
+ {
++	nm_assert (nm_device_is_master (NM_DEVICE (self)));
+ }
+ 
+ static void
+@@ -503,8 +498,8 @@ nm_device_bridge_class_init (NMDeviceBridgeClass *klass)
+ 
+ 	NM_DEVICE_CLASS_DECLARE_TYPES (klass, NM_SETTING_BRIDGE_SETTING_NAME, NM_LINK_TYPE_BRIDGE)
+ 
++	parent_class->is_master = TRUE;
+ 	parent_class->get_generic_capabilities = get_generic_capabilities;
+-	parent_class->is_available = is_available;
+ 	parent_class->check_connection_compatible = check_connection_compatible;
+ 	parent_class->check_connection_available = check_connection_available;
+ 	parent_class->complete_connection = complete_connection;
+@@ -543,7 +538,6 @@ create_device (NMDeviceFactory *factory,
+ 	                                  NM_DEVICE_TYPE_DESC, "Bridge",
+ 	                                  NM_DEVICE_DEVICE_TYPE, NM_DEVICE_TYPE_BRIDGE,
+ 	                                  NM_DEVICE_LINK_TYPE, NM_LINK_TYPE_BRIDGE,
+-	                                  NM_DEVICE_IS_MASTER, TRUE,
+ 	                                  NULL);
+ }
+ 
+diff --git a/src/devices/nm-device-ethernet.c b/src/devices/nm-device-ethernet.c
+index 8a04d40..8044ec3 100644
+--- a/src/devices/nm-device-ethernet.c
++++ b/src/devices/nm-device-ethernet.c
+@@ -115,7 +115,8 @@ typedef struct _NMDeviceEthernetPrivate {
+ 	/* DCB */
+ 	DcbWait       dcb_wait;
+ 	guint         dcb_timeout_id;
+-	gulong        dcb_carrier_id;
++
++	bool          dcb_handle_carrier_changes:1;
+ } NMDeviceEthernetPrivate;
+ 
+ NM_GOBJECT_PROPERTIES_DEFINE (NMDeviceEthernet,
+@@ -1133,7 +1134,7 @@ dcb_state (NMDevice *device, gboolean timeout)
+ 			_LOGD (LOGD_DCB, "dcb_state() enabling DCB");
+ 			nm_clear_g_source (&priv->dcb_timeout_id);
+ 			if (!dcb_enable (device)) {
+-				nm_clear_g_signal_handler (device, &priv->dcb_carrier_id);
++				priv->dcb_handle_carrier_changes = FALSE;
+ 				nm_device_state_changed (device,
+ 				                         NM_DEVICE_STATE_FAILED,
+ 				                         NM_DEVICE_STATE_REASON_DCB_FCOE_FAILED);
+@@ -1157,7 +1158,7 @@ dcb_state (NMDevice *device, gboolean timeout)
+ 			_LOGD (LOGD_DCB, "dcb_state() preconfig up configuring DCB");
+ 			nm_clear_g_source (&priv->dcb_timeout_id);
+ 			if (!dcb_configure (device)) {
+-				nm_clear_g_signal_handler (device, &priv->dcb_carrier_id);
++				priv->dcb_handle_carrier_changes = FALSE;
+ 				nm_device_state_changed (device,
+ 				                         NM_DEVICE_STATE_FAILED,
+ 				                         NM_DEVICE_STATE_REASON_DCB_FCOE_FAILED);
+@@ -1180,7 +1181,7 @@ dcb_state (NMDevice *device, gboolean timeout)
+ 		if (timeout || carrier) {
+ 			_LOGD (LOGD_DCB, "dcb_state() postconfig up starting IP");
+ 			nm_clear_g_source (&priv->dcb_timeout_id);
+-			nm_clear_g_signal_handler (device, &priv->dcb_carrier_id);
++			priv->dcb_handle_carrier_changes = FALSE;
+ 			priv->dcb_wait = DCB_WAIT_UNKNOWN;
+ 			nm_device_activate_schedule_stage3_ip_config_start (device);
+ 		}
+@@ -1190,20 +1191,6 @@ dcb_state (NMDevice *device, gboolean timeout)
+ 	}
+ }
+ 
+-static void
+-dcb_carrier_changed (NMDevice *device, GParamSpec *pspec, gpointer unused)
+-{
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (device);
+-	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+-
+-	g_return_if_fail (nm_device_get_state (device) == NM_DEVICE_STATE_CONFIG);
+-
+-	if (priv->dcb_timeout_id) {
+-		_LOGD (LOGD_DCB, "carrier_changed() calling dcb_state()");
+-		dcb_state (device, FALSE);
+-	}
+-}
+-
+ /*****************************************************************************/
+ 
+ static gboolean
+@@ -1262,7 +1249,7 @@ act_stage2_config (NMDevice *device, NMDeviceStateReason *out_failure_reason)
+ 	g_return_val_if_fail (s_con, NM_ACT_STAGE_RETURN_FAILURE);
+ 
+ 	nm_clear_g_source (&priv->dcb_timeout_id);
+-	nm_clear_g_signal_handler (device, &priv->dcb_carrier_id);
++	priv->dcb_handle_carrier_changes = FALSE;
+ 
+ 	/* 802.1x has to run before any IP configuration since the 802.1x auth
+ 	 * process opens the port up for normal traffic.
+@@ -1296,13 +1283,7 @@ act_stage2_config (NMDevice *device, NMDeviceStateReason *out_failure_reason)
+ 			priv->dcb_timeout_id = g_timeout_add_seconds (4, dcb_carrier_timeout, device);
+ 		}
+ 
+-		/* Watch carrier independently of NMDeviceClass::carrier_changed so
+-		 * we get instant notifications of disconnection that aren't deferred.
+-		 */
+-		priv->dcb_carrier_id = g_signal_connect (device,
+-		                                         "notify::" NM_DEVICE_CARRIER,
+-		                                         G_CALLBACK (dcb_carrier_changed),
+-		                                         NULL);
++		priv->dcb_handle_carrier_changes = TRUE;
+ 		ret = NM_ACT_STAGE_RETURN_POSTPONE;
+ 	}
+ 
+@@ -1386,7 +1367,7 @@ deactivate (NMDevice *device)
+ 
+ 	priv->dcb_wait = DCB_WAIT_UNKNOWN;
+ 	nm_clear_g_source (&priv->dcb_timeout_id);
+-	nm_clear_g_signal_handler (device, &priv->dcb_carrier_id);
++	priv->dcb_handle_carrier_changes = FALSE;
+ 
+ 	/* Tear down DCB/FCoE if it was enabled */
+ 	s_dcb = (NMSettingDcb *) nm_device_get_applied_setting (device, NM_TYPE_SETTING_DCB);
+@@ -1579,7 +1560,7 @@ update_connection (NMDevice *device, NMConnection *connection)
+ }
+ 
+ static void
+-get_link_speed (NMDevice *device)
++link_speed_update (NMDevice *device)
+ {
+ 	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (device);
+ 	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+@@ -1591,16 +1572,28 @@ get_link_speed (NMDevice *device)
+ 		return;
+ 
+ 	priv->speed = speed;
+-	_notify (self, PROP_SPEED);
+-
+ 	_LOGD (LOGD_PLATFORM | LOGD_ETHER, "speed is now %d Mb/s", speed);
++	_notify (self, PROP_SPEED);
+ }
+ 
+ static void
+ carrier_changed_notify (NMDevice *device, gboolean carrier)
+ {
++	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (device);
++	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
++
++	if (priv->dcb_handle_carrier_changes) {
++		nm_assert (nm_device_get_state (device) == NM_DEVICE_STATE_CONFIG);
++
++		if (priv->dcb_timeout_id) {
++			_LOGD (LOGD_DCB, "carrier_changed() calling dcb_state()");
++			dcb_state (device, FALSE);
++		}
++	}
++
+ 	if (carrier)
+-		get_link_speed (device);
++		link_speed_update (device);
++
+ 	NM_DEVICE_CLASS (nm_device_ethernet_parent_class)->carrier_changed_notify (device, carrier);
+ }
+ 
+@@ -1682,7 +1675,6 @@ dispose (GObject *object)
+ 	nm_clear_g_source (&priv->pppoe_wait_id);
+ 
+ 	nm_clear_g_source (&priv->dcb_timeout_id);
+-	nm_clear_g_signal_handler (self, &priv->dcb_carrier_id);
+ 
+ 	G_OBJECT_CLASS (nm_device_ethernet_parent_class)->dispose (object);
+ }
+diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
+index e11b715..ba09bb4 100644
+--- a/src/devices/nm-device.c
++++ b/src/devices/nm-device.c
+@@ -188,7 +188,6 @@ NM_GOBJECT_PROPERTIES_DEFINE (NMDevice,
+ 	PROP_IFINDEX,
+ 	PROP_AVAILABLE_CONNECTIONS,
+ 	PROP_PHYSICAL_PORT_ID,
+-	PROP_IS_MASTER,
+ 	PROP_MASTER,
+ 	PROP_PARENT,
+ 	PROP_HW_ADDRESS,
+@@ -451,7 +450,6 @@ typedef struct _NMDevicePrivate {
+ 	gulong          master_ready_id;
+ 
+ 	/* slave management */
+-	bool            is_master;
+ 	CList           slaves;    /* list of SlaveInfo */
+ 
+ 	NMMetered       metered;
+@@ -2183,8 +2181,6 @@ carrier_changed (NMDevice *self, gboolean carrier)
+ {
+ 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+ 
+-	NM_DEVICE_GET_CLASS (self)->carrier_changed_notify (self, carrier);
+-
+ 	if (priv->state <= NM_DEVICE_STATE_UNMANAGED)
+ 		return;
+ 
+@@ -2194,20 +2190,21 @@ carrier_changed (NMDevice *self, gboolean carrier)
+ 	if (priv->ignore_carrier && !carrier)
+ 		return;
+ 
+-	if (priv->is_master) {
+-		/* Bridge/bond/team carrier does not affect its own activation,
+-		 * but when carrier comes on, if there are slaves waiting,
+-		 * it will restart them.
+-		 */
+-		if (!carrier)
++	if (nm_device_is_master (self)) {
++		if (carrier) {
++			/* Force master to retry getting ip addresses when carrier
++			* is restored. */
++			if (priv->state == NM_DEVICE_STATE_ACTIVATED)
++				nm_device_update_dynamic_ip_setup (self);
++			else {
++				if (nm_device_activate_ip4_state_in_wait (self))
++					nm_device_activate_stage3_ip4_start (self);
++				if (nm_device_activate_ip6_state_in_wait (self))
++					nm_device_activate_stage3_ip6_start (self);
++			}
+ 			return;
+-
+-		if (nm_device_activate_ip4_state_in_wait (self))
+-			nm_device_activate_stage3_ip4_start (self);
+-		if (nm_device_activate_ip6_state_in_wait (self))
+-			nm_device_activate_stage3_ip6_start (self);
+-
+-		return;
++		}
++		/* fall-through and change state of device */
+ 	} else if (priv->is_enslaved && !carrier) {
+ 		/* Slaves don't deactivate when they lose carrier; for
+ 		 * bonds/teams in particular that would be actively
+@@ -2254,7 +2251,7 @@ carrier_disconnected_action_cb (gpointer user_data)
+ 	NMDevice *self = NM_DEVICE (user_data);
+ 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+ 
+-	_LOGD (LOGD_DEVICE, "link disconnected (calling deferred action) (id=%u)", priv->carrier_defer_id);
++	_LOGD (LOGD_DEVICE, "carrier: link disconnected (calling deferred action) (id=%u)", priv->carrier_defer_id);
+ 
+ 	priv->carrier_defer_id = 0;
+ 	carrier_changed (self, FALSE);
+@@ -2268,7 +2265,7 @@ carrier_disconnected_action_cancel (NMDevice *self)
+ 	guint id = priv->carrier_defer_id;
+ 
+ 	if (nm_clear_g_source (&priv->carrier_defer_id)) {
+-		_LOGD (LOGD_DEVICE, "link disconnected (canceling deferred action) (id=%u)",
++		_LOGD (LOGD_DEVICE, "carrier: link disconnected (canceling deferred action) (id=%u)",
+ 		       id);
+ 	}
+ }
+@@ -2286,8 +2283,9 @@ nm_device_set_carrier (NMDevice *self, gboolean carrier)
+ 	_notify (self, PROP_CARRIER);
+ 
+ 	if (priv->carrier) {
+-		_LOGI (LOGD_DEVICE, "link connected");
++		_LOGI (LOGD_DEVICE, "carrier: link connected");
+ 		carrier_disconnected_action_cancel (self);
++		NM_DEVICE_GET_CLASS (self)->carrier_changed_notify (self, carrier);
+ 		carrier_changed (self, TRUE);
+ 
+ 		if (priv->carrier_wait_id) {
+@@ -2297,14 +2295,15 @@ nm_device_set_carrier (NMDevice *self, gboolean carrier)
+ 	} else {
+ 		if (priv->carrier_wait_id)
+ 			nm_device_add_pending_action (self, NM_PENDING_ACTION_CARRIER_WAIT, FALSE);
++		NM_DEVICE_GET_CLASS (self)->carrier_changed_notify (self, carrier);
+ 		if (   state <= NM_DEVICE_STATE_DISCONNECTED
+ 		    && !priv->queued_act_request) {
+-			_LOGD (LOGD_DEVICE, "link disconnected");
++			_LOGD (LOGD_DEVICE, "carrier: link disconnected");
+ 			carrier_changed (self, FALSE);
+ 		} else {
+ 			priv->carrier_defer_id = g_timeout_add_seconds (LINK_DISCONNECT_DELAY,
+ 			                                                carrier_disconnected_action_cb, self);
+-			_LOGD (LOGD_DEVICE, "link disconnected (deferring action for %d seconds) (id=%u)",
++			_LOGD (LOGD_DEVICE, "carrier: link disconnected (deferring action for %d seconds) (id=%u)",
+ 			       LINK_DISCONNECT_DELAY, priv->carrier_defer_id);
+ 		}
+ 	}
+@@ -3531,7 +3530,9 @@ nm_device_master_release_slaves (NMDevice *self)
+ gboolean
+ nm_device_is_master (NMDevice *self)
+ {
+-	return NM_DEVICE_GET_PRIVATE (self)->is_master;
++	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
++
++	return NM_DEVICE_GET_CLASS (self)->is_master;
+ }
+ 
+ /**
+@@ -3705,12 +3706,17 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+ {
+ 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+ 
+-	if (priv->carrier || priv->ignore_carrier)
++	if (   priv->carrier
++	    || priv->ignore_carrier)
+ 		return TRUE;
+ 
+ 	if (NM_FLAGS_HAS (flags, _NM_DEVICE_CHECK_DEV_AVAILABLE_IGNORE_CARRIER))
+ 		return TRUE;
+ 
++	/* master types are always available even without carrier. */
++	if (nm_device_is_master (self))
++		return TRUE;
++
+ 	return FALSE;
+ }
+ 
+@@ -3745,6 +3751,13 @@ nm_device_is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
+ }
+ 
+ gboolean
++nm_device_ignore_carrier_by_default (NMDevice *self)
++{
++	/* master types ignore-carrier by default. */
++	return nm_device_is_master (self);
++}
++
++gboolean
+ nm_device_get_enabled (NMDevice *self)
+ {
+ 	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
+@@ -4190,7 +4203,7 @@ nm_device_check_slave_connection_compatible (NMDevice *self, NMConnection *slave
+ 
+ 	priv = NM_DEVICE_GET_PRIVATE (self);
+ 
+-	if (!priv->is_master)
++	if (!nm_device_is_master (self))
+ 		return FALSE;
+ 
+ 	/* All masters should have connection type set */
+@@ -6033,14 +6046,14 @@ act_stage3_ip4_config_start (NMDevice *self,
+ 	g_return_val_if_fail (connection, NM_ACT_STAGE_RETURN_FAILURE);
+ 
+ 	if (   connection_ip4_method_requires_carrier (connection, NULL)
+-	    && priv->is_master
++	    && nm_device_is_master (self)
+ 	    && !priv->carrier) {
+ 		_LOGI (LOGD_IP4 | LOGD_DEVICE,
+ 		       "IPv4 config waiting until carrier is on");
+ 		return NM_ACT_STAGE_RETURN_IP_WAIT;
+ 	}
+ 
+-	if (priv->is_master && ip4_requires_slaves (connection)) {
++	if (nm_device_is_master (self) && ip4_requires_slaves (connection)) {
+ 		/* If the master has no ready slaves, and depends on slaves for
+ 		 * a successful IPv4 attempt, then postpone IPv4 addressing.
+ 		 */
+@@ -7634,14 +7647,14 @@ act_stage3_ip6_config_start (NMDevice *self,
+ 	g_return_val_if_fail (connection, NM_ACT_STAGE_RETURN_FAILURE);
+ 
+ 	if (   connection_ip6_method_requires_carrier (connection, NULL)
+-	    && priv->is_master
++	    && nm_device_is_master (self)
+ 	    && !priv->carrier) {
+ 		_LOGI (LOGD_IP6 | LOGD_DEVICE,
+ 		       "IPv6 config waiting until carrier is on");
+ 		return NM_ACT_STAGE_RETURN_IP_WAIT;
+ 	}
+ 
+-	if (priv->is_master && ip6_requires_slaves (connection)) {
++	if (nm_device_is_master (self) && ip6_requires_slaves (connection)) {
+ 		/* If the master has no ready slaves, and depends on slaves for
+ 		 * a successful IPv6 attempt, then postpone IPv6 addressing.
+ 		 */
+@@ -8268,7 +8281,7 @@ arp_announce (NMDevice *self)
+ }
+ 
+ static void
+-activate_stage5_ip4_config_commit (NMDevice *self)
++activate_stage5_ip4_config_result (NMDevice *self)
+ {
+ 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+ 	NMActRequest *req;
+@@ -8340,7 +8353,7 @@ nm_device_activate_schedule_ip4_config_result (NMDevice *self, NMIP4Config *conf
+ 	if (config)
+ 		priv->dev_ip4_config = g_object_ref (config);
+ 
+-	activation_source_schedule (self, activate_stage5_ip4_config_commit, AF_INET);
++	activation_source_schedule (self, activate_stage5_ip4_config_result, AF_INET);
+ }
+ 
+ gboolean
+@@ -10540,7 +10553,7 @@ update_ip4_config (NMDevice *self, gboolean initial)
+ 	 */
+ 	if (   !initial
+ 	    && activation_source_is_scheduled (self,
+-	                                       activate_stage5_ip4_config_commit,
++	                                       activate_stage5_ip4_config_result,
+ 	                                       AF_INET)) {
+ 		priv->queued_ip4_config_pending = FALSE;
+ 		priv->queued_ip4_config_id = g_idle_add (queued_ip4_config_change, self);
+@@ -11563,6 +11576,12 @@ check_connection_available (NMDevice *self,
+ 		return TRUE;
+ 	}
+ 
++	/* master types are always available even without carrier.
++	 * Making connection non-available would un-enslave slaves which
++	 * is not desired. */
++	if (nm_device_is_master (self))
++		return TRUE;
++
+ 	return FALSE;
+ }
+ 
+@@ -13464,6 +13483,12 @@ nm_device_get_initial_hw_address (NMDevice *self)
+ gboolean
+ nm_device_spec_match_list (NMDevice *self, const GSList *specs)
+ {
++	return nm_device_spec_match_list_full (self, specs, FALSE);
++}
++
++int
++nm_device_spec_match_list_full (NMDevice *self, const GSList *specs, int no_match_value)
++{
+ 	NMDeviceClass *klass;
+ 	NMMatchSpecMatchType m;
+ 
+@@ -13478,7 +13503,17 @@ nm_device_spec_match_list (NMDevice *self, const GSList *specs)
+ 	                          nm_device_get_driver_version (self),
+ 	                          nm_device_get_permanent_hw_address (self),
+ 	                          klass->get_s390_subchannels ? klass->get_s390_subchannels (self) : NULL);
+-	return m == NM_MATCH_SPEC_MATCH;
++
++	switch (m) {
++	case NM_MATCH_SPEC_MATCH:
++		return TRUE;
++	case NM_MATCH_SPEC_NEG_MATCH:
++		return FALSE;
++	case NM_MATCH_SPEC_NO_MATCH:
++		return no_match_value;
++	}
++	nm_assert_not_reached ();
++	return no_match_value;
+ }
+ 
+ guint
+@@ -13523,7 +13558,7 @@ _activation_func_to_string (ActivationHandleFunc func)
+ 	FUNC_TO_STRING_CHECK_AND_RETURN (func, activate_stage3_ip_config_start);
+ 	FUNC_TO_STRING_CHECK_AND_RETURN (func, activate_stage4_ip4_config_timeout);
+ 	FUNC_TO_STRING_CHECK_AND_RETURN (func, activate_stage4_ip6_config_timeout);
+-	FUNC_TO_STRING_CHECK_AND_RETURN (func, activate_stage5_ip4_config_commit);
++	FUNC_TO_STRING_CHECK_AND_RETURN (func, activate_stage5_ip4_config_result);
+ 	FUNC_TO_STRING_CHECK_AND_RETURN (func, activate_stage5_ip6_config_commit);
+ 	g_return_val_if_reached ("unknown");
+ }
+@@ -13864,10 +13899,6 @@ set_property (GObject *object, guint prop_id,
+ 		/* construct-only */
+ 		priv->rfkill_type = g_value_get_uint (value);
+ 		break;
+-	case PROP_IS_MASTER:
+-		/* construct-only */
+-		priv->is_master = g_value_get_boolean (value);
+-		break;
+ 	case PROP_PERM_HW_ADDRESS:
+ 		/* construct-only */
+ 		priv->hw_addr_perm = g_value_dup_string (value);
+@@ -14002,9 +14033,6 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_PHYSICAL_PORT_ID:
+ 		g_value_set_string (value, priv->physical_port_id);
+ 		break;
+-	case PROP_IS_MASTER:
+-		g_value_set_boolean (value, priv->is_master);
+-		break;
+ 	case PROP_MASTER:
+ 		g_value_set_object (value, nm_device_get_master (self));
+ 		break;
+@@ -14267,11 +14295,6 @@ nm_device_class_init (NMDeviceClass *klass)
+ 	                         NULL,
+ 	                         G_PARAM_READABLE |
+ 	                         G_PARAM_STATIC_STRINGS);
+-	obj_properties[PROP_IS_MASTER] =
+-	    g_param_spec_boolean (NM_DEVICE_IS_MASTER, "", "",
+-	                          FALSE,
+-	                          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
+-	                          G_PARAM_STATIC_STRINGS);
+ 	obj_properties[PROP_MASTER] =
+ 	    g_param_spec_object (NM_DEVICE_MASTER, "", "",
+ 	                         NM_TYPE_DEVICE,
+diff --git a/src/devices/nm-device.h b/src/devices/nm-device.h
+index e7d7994..47b8f6f 100644
+--- a/src/devices/nm-device.h
++++ b/src/devices/nm-device.h
+@@ -120,7 +120,6 @@ nm_device_state_reason_check (NMDeviceStateReason reason)
+ #define NM_DEVICE_TYPE_DESC        "type-desc"      /* Internal only */
+ #define NM_DEVICE_RFKILL_TYPE      "rfkill-type"    /* Internal only */
+ #define NM_DEVICE_IFINDEX          "ifindex"        /* Internal only */
+-#define NM_DEVICE_IS_MASTER        "is-master"      /* Internal only */
+ #define NM_DEVICE_MASTER           "master"         /* Internal only */
+ #define NM_DEVICE_HAS_PENDING_ACTION "has-pending-action" /* Internal only */
+ 
+@@ -196,6 +195,10 @@ typedef struct {
+ 	const char *connection_type;
+ 	const NMLinkType *link_types;
+ 
++	/* Whether the device type is a master-type. This depends purely on the
++	 * type (NMDeviceClass), not the actual device instance. */
++	bool is_master:1;
++
+ 	void (*state_changed) (NMDevice *device,
+ 	                       NMDeviceState new_state,
+ 	                       NMDeviceState old_state,
+@@ -481,6 +484,8 @@ NMSetting *     nm_device_get_applied_setting   (NMDevice *dev, GType setting_ty
+ 
+ void            nm_device_removed               (NMDevice *self, gboolean unconfigure_ip_config);
+ 
++gboolean        nm_device_ignore_carrier_by_default (NMDevice *self);
++
+ gboolean        nm_device_is_available          (NMDevice *dev, NMDeviceCheckDevAvailableFlags flags);
+ gboolean        nm_device_has_carrier           (NMDevice *dev);
+ 
+@@ -507,6 +512,7 @@ gboolean nm_device_check_slave_connection_compatible (NMDevice *device, NMConnec
+ gboolean nm_device_unmanage_on_quit (NMDevice *self);
+ 
+ gboolean nm_device_spec_match_list (NMDevice *device, const GSList *specs);
++int      nm_device_spec_match_list_full (NMDevice *self, const GSList *specs, int no_match_value);
+ 
+ gboolean nm_device_is_activating (NMDevice *dev);
+ gboolean nm_device_autoconnect_allowed (NMDevice *self);
+diff --git a/src/devices/team/nm-device-team.c b/src/devices/team/nm-device-team.c
+index c457e91..aeb39eb 100644
+--- a/src/devices/team/nm-device-team.c
++++ b/src/devices/team/nm-device-team.c
+@@ -84,24 +84,6 @@ get_generic_capabilities (NMDevice *device)
+ }
+ 
+ static gboolean
+-is_available (NMDevice *device, NMDeviceCheckDevAvailableFlags flags)
+-{
+-	return TRUE;
+-}
+-
+-static gboolean
+-check_connection_available (NMDevice *device,
+-                            NMConnection *connection,
+-                            NMDeviceCheckConAvailableFlags flags,
+-                            const char *specific_object)
+-{
+-	/* Connections are always available because the carrier state is determined
+-	 * by the team port carrier states, not the team's state.
+-	 */
+-	return TRUE;
+-}
+-
+-static gboolean
+ check_connection_compatible (NMDevice *device, NMConnection *connection)
+ {
+ 	NMSettingTeam *s_team;
+@@ -822,6 +804,7 @@ get_property (GObject *object, guint prop_id,
+ static void
+ nm_device_team_init (NMDeviceTeam * self)
+ {
++	nm_assert (nm_device_is_master (NM_DEVICE (self)));
+ }
+ 
+ static void
+@@ -854,7 +837,6 @@ nm_device_team_new (const char *iface)
+ 	                                  NM_DEVICE_TYPE_DESC, "Team",
+ 	                                  NM_DEVICE_DEVICE_TYPE, NM_DEVICE_TYPE_TEAM,
+ 	                                  NM_DEVICE_LINK_TYPE, NM_LINK_TYPE_TEAM,
+-	                                  NM_DEVICE_IS_MASTER, TRUE,
+ 	                                  NULL);
+ }
+ 
+@@ -887,11 +869,10 @@ nm_device_team_class_init (NMDeviceTeamClass *klass)
+ 	object_class->dispose = dispose;
+ 	object_class->get_property = get_property;
+ 
++	parent_class->is_master = TRUE;
+ 	parent_class->create_and_realize = create_and_realize;
+ 	parent_class->get_generic_capabilities = get_generic_capabilities;
+-	parent_class->is_available = is_available;
+ 	parent_class->check_connection_compatible = check_connection_compatible;
+-	parent_class->check_connection_available = check_connection_available;
+ 	parent_class->complete_connection = complete_connection;
+ 	parent_class->update_connection = update_connection;
+ 	parent_class->master_update_slave_connection = master_update_slave_connection;
+diff --git a/src/dhcp/tests/test-dhcp-dhclient.c b/src/dhcp/tests/test-dhcp-dhclient.c
+index 6e75578..2308cf7 100644
+--- a/src/dhcp/tests/test-dhcp-dhclient.c
++++ b/src/dhcp/tests/test-dhcp-dhclient.c
+@@ -863,19 +863,19 @@ test_read_lease_ip4_config_basic (void)
+ 
+ 	/* Address */
+ 	g_assert_cmpint (nm_ip4_config_get_num_addresses (config), ==, 1);
+-	g_assert (inet_aton ("192.168.1.180", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("192.168.1.180");
+ 	addr = nm_ip4_config_get_address (config, 0);
+ 	g_assert_cmpint (addr->address, ==, expected_addr);
+ 	g_assert_cmpint (addr->peer_address, ==, expected_addr);
+ 	g_assert_cmpint (addr->plen, ==, 24);
+ 
+ 	/* Gateway */
+-	g_assert (inet_aton ("192.168.1.1", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("192.168.1.1");
+ 	g_assert_cmpint (nm_ip4_config_get_gateway (config), ==, expected_addr);
+ 
+ 	/* DNS */
+ 	g_assert_cmpint (nm_ip4_config_get_num_nameservers (config), ==, 1);
+-	g_assert (inet_aton ("192.168.1.1", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("192.168.1.1");
+ 	g_assert_cmpint (nm_ip4_config_get_nameserver (config, 0), ==, expected_addr);
+ 
+ 	g_assert_cmpint (nm_ip4_config_get_num_domains (config), ==, 0);
+@@ -886,21 +886,21 @@ test_read_lease_ip4_config_basic (void)
+ 
+ 	/* Address */
+ 	g_assert_cmpint (nm_ip4_config_get_num_addresses (config), ==, 1);
+-	g_assert (inet_aton ("10.77.52.141", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("10.77.52.141");
+ 	addr = nm_ip4_config_get_address (config, 0);
+ 	g_assert_cmpint (addr->address, ==, expected_addr);
+ 	g_assert_cmpint (addr->peer_address, ==, expected_addr);
+ 	g_assert_cmpint (addr->plen, ==, 8);
+ 
+ 	/* Gateway */
+-	g_assert (inet_aton ("10.77.52.254", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("10.77.52.254");
+ 	g_assert_cmpint (nm_ip4_config_get_gateway (config), ==, expected_addr);
+ 
+ 	/* DNS */
+ 	g_assert_cmpint (nm_ip4_config_get_num_nameservers (config), ==, 2);
+-	g_assert (inet_aton ("8.8.8.8", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("8.8.8.8");
+ 	g_assert_cmpint (nm_ip4_config_get_nameserver (config, 0), ==, expected_addr);
+-	g_assert (inet_aton ("8.8.4.4", (struct in_addr *) &expected_addr));
++	expected_addr = nmtst_inet4_from_string ("8.8.4.4");
+ 	g_assert_cmpint (nm_ip4_config_get_nameserver (config, 1), ==, expected_addr);
+ 
+ 	/* Domains */
+diff --git a/src/nm-config-data.c b/src/nm-config-data.c
+index 8f4d112..21ad1a7 100644
+--- a/src/nm-config-data.c
++++ b/src/nm-config-data.c
+@@ -304,15 +304,22 @@ nm_config_data_get_ignore_carrier (const NMConfigData *self, NMDevice *device)
+ {
+ 	gs_free char *value = NULL;
+ 	gboolean has_match;
++	int m;
+ 
+ 	g_return_val_if_fail (NM_IS_CONFIG_DATA (self), FALSE);
+ 	g_return_val_if_fail (NM_IS_DEVICE (device), FALSE);
+ 
+ 	value = nm_config_data_get_device_config (self, NM_CONFIG_KEYFILE_KEY_DEVICE_IGNORE_CARRIER, device, &has_match);
+ 	if (has_match)
+-		return nm_config_parse_boolean (value, FALSE);
++		m = nm_config_parse_boolean (value, -1);
++	else
++		m = nm_device_spec_match_list_full (device, NM_CONFIG_DATA_GET_PRIVATE (self)->ignore_carrier, -1);
+ 
+-	return nm_device_spec_match_list (device, NM_CONFIG_DATA_GET_PRIVATE (self)->ignore_carrier);
++	if (NM_IN_SET (m, TRUE, FALSE))
++		return m;
++
++	/* if ignore-carrier is not explicitly configed, then it depends on the device (type). */
++	return nm_device_ignore_carrier_by_default (device);
+ }
+ 
+ gboolean
+diff --git a/src/nm-connectivity.c b/src/nm-connectivity.c
+index b96737c..6f16b28 100644
+--- a/src/nm-connectivity.c
++++ b/src/nm-connectivity.c
+@@ -486,27 +486,28 @@ nm_connectivity_init (NMConnectivity *self)
+ 	NMConnectivityPrivate *priv = NM_CONNECTIVITY_GET_PRIVATE (self);
+ 	CURLcode retv;
+ 
+-	priv->config = g_object_ref (nm_config_get ());
+-	update_config (self, nm_config_get_data (priv->config));
+-	g_signal_connect (G_OBJECT (priv->config),
+-	                  NM_CONFIG_SIGNAL_CONFIG_CHANGED,
+-	                  G_CALLBACK (config_changed_cb),
+-	                  self);
+-
+ 	retv = curl_global_init (CURL_GLOBAL_ALL);
+ 	if (retv == CURLE_OK)
+ 		priv->curl_mhandle = curl_multi_init ();
+ 
+-	if (priv->curl_mhandle == NULL) {
++	if (!priv->curl_mhandle)
+ 		 _LOGE ("unable to init cURL, connectivity check will not work");
+-		return;
++	else {
++		curl_multi_setopt (priv->curl_mhandle, CURLMOPT_SOCKETFUNCTION, multi_socket_cb);
++		curl_multi_setopt (priv->curl_mhandle, CURLMOPT_SOCKETDATA, self);
++		curl_multi_setopt (priv->curl_mhandle, CURLMOPT_TIMERFUNCTION, multi_timer_cb);
++		curl_multi_setopt (priv->curl_mhandle, CURLMOPT_TIMERDATA, self);
++		curl_multi_setopt (priv->curl_mhandle, CURLOPT_VERBOSE, 1);
+ 	}
+ 
+-	curl_multi_setopt (priv->curl_mhandle, CURLMOPT_SOCKETFUNCTION, multi_socket_cb);
+-	curl_multi_setopt (priv->curl_mhandle, CURLMOPT_SOCKETDATA, self);
+-	curl_multi_setopt (priv->curl_mhandle, CURLMOPT_TIMERFUNCTION, multi_timer_cb);
+-	curl_multi_setopt (priv->curl_mhandle, CURLMOPT_TIMERDATA, self);
+-	curl_multi_setopt (priv->curl_mhandle, CURLOPT_VERBOSE, 1);
++	priv->config = g_object_ref (nm_config_get ());
++
++	update_config (self, nm_config_get_data (priv->config));
++	g_signal_connect (G_OBJECT (priv->config),
++	                  NM_CONFIG_SIGNAL_CONFIG_CHANGED,
++	                  G_CALLBACK (config_changed_cb),
++	                  self);
++
+ }
+ 
+ static void
+diff --git a/src/settings/nm-settings-connection.c b/src/settings/nm-settings-connection.c
+index 76b0ff5..ce0091f 100644
+--- a/src/settings/nm-settings-connection.c
++++ b/src/settings/nm-settings-connection.c
+@@ -2341,33 +2341,35 @@ void
+ nm_settings_connection_read_and_fill_timestamp (NMSettingsConnection *self)
+ {
+ 	NMSettingsConnectionPrivate *priv = NM_SETTINGS_CONNECTION_GET_PRIVATE (self);
++	gs_unref_keyfile GKeyFile *timestamps_file = NULL;
++	gs_free_error GError *error = NULL;
++	gs_free char *tmp_str = NULL;
+ 	const char *connection_uuid;
+-	guint64 timestamp = 0;
+-	GKeyFile *timestamps_file;
+-	GError *err = NULL;
+-	char *tmp_str;
++	gint64 timestamp;
+ 
+ 	g_return_if_fail (NM_IS_SETTINGS_CONNECTION (self));
+ 
+-	/* Get timestamp from database file */
+ 	timestamps_file = g_key_file_new ();
+-	g_key_file_load_from_file (timestamps_file, SETTINGS_TIMESTAMPS_FILE, G_KEY_FILE_KEEP_COMMENTS, NULL);
++	if (!g_key_file_load_from_file (timestamps_file, SETTINGS_TIMESTAMPS_FILE, G_KEY_FILE_KEEP_COMMENTS, &error)) {
++		_LOGD ("failed to read connection timestamp: %s", error->message);
++		return;
++	}
++
+ 	connection_uuid = nm_settings_connection_get_uuid (self);
+-	tmp_str = g_key_file_get_value (timestamps_file, "timestamps", connection_uuid, &err);
+-	if (tmp_str) {
+-		timestamp = g_ascii_strtoull (tmp_str, NULL, 10);
+-		g_free (tmp_str);
++	tmp_str = g_key_file_get_value (timestamps_file, "timestamps", connection_uuid, &error);
++	if (!tmp_str) {
++		_LOGD ("failed to read connection timestamp: %s", error->message);
++		return;
+ 	}
+ 
+-	/* Update connection's timestamp */
+-	if (!err) {
+-		priv->timestamp = timestamp;
+-		priv->timestamp_set = TRUE;
+-	} else {
+-		_LOGD ("failed to read connection timestamp: %s", err->message);
+-		g_clear_error (&err);
++	timestamp = _nm_utils_ascii_str_to_int64 (tmp_str, 10, 0, G_MAXINT64, -1);
++	if (timestamp < 0) {
++		_LOGD ("failed to read connection timestamp: %s", "invalid number");
++		return;
+ 	}
+-	g_key_file_free (timestamps_file);
++
++	priv->timestamp = timestamp;
++	priv->timestamp_set = TRUE;
+ }
+ 
+ /**
+diff --git a/src/settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/src/settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index 6b37ac8..b068b6e 100644
+--- a/src/settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/src/settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -4969,15 +4969,16 @@ test_write_wired_aliases (void)
+ 			if (!g_strcmp0 (addrstr, ip[j]))
+ 				break;
+ 		}
+-		g_assert (j < num_addresses);
+-
+-		g_assert_cmpint (nm_ip_address_get_prefix (addr), ==, 24);
+-		if (label[j])
+-			g_assert_cmpstr (g_variant_get_string (nm_ip_address_get_attribute (addr, "label"), NULL), ==, label[j]);
+-		else
+-			g_assert (nm_ip_address_get_attribute (addr, "label") == NULL);
+-
+-		ip[j] = NULL;
++		if (j >= num_addresses)
++			g_assert_not_reached ();
++		else {
++			g_assert_cmpint (nm_ip_address_get_prefix (addr), ==, 24);
++			if (label[j])
++				g_assert_cmpstr (g_variant_get_string (nm_ip_address_get_attribute (addr, "label"), NULL), ==, label[j]);
++			else
++				g_assert (nm_ip_address_get_attribute (addr, "label") == NULL);
++			ip[j] = NULL;
++		}
+ 	}
+ 
+ 	for (i = 0; i < num_addresses; i++)
+diff --git a/src/supplicant/nm-supplicant-interface.c b/src/supplicant/nm-supplicant-interface.c
+index 84ac640..ddbc868 100644
+--- a/src/supplicant/nm-supplicant-interface.c
++++ b/src/supplicant/nm-supplicant-interface.c
+@@ -235,15 +235,17 @@ bss_proxy_acquired_cb (GDBusProxy *proxy, GAsyncResult *result, gpointer user_da
+ 	GVariant *props = NULL;
+ 	const char *object_path;
+ 	BssData *bss_data;
++	gboolean success;
+ 
+-	g_async_initable_init_finish (G_ASYNC_INITABLE (proxy), result, &error);
+-	if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++	success = g_async_initable_init_finish (G_ASYNC_INITABLE (proxy), result, &error);
++	if (   !success
++	    && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+ 		return;
+ 
+ 	self = NM_SUPPLICANT_INTERFACE (user_data);
+ 	priv = NM_SUPPLICANT_INTERFACE_GET_PRIVATE (self);
+ 
+-	if (error) {
++	if (!success) {
+ 		_LOGD ("failed to acquire BSS proxy: (%s)", error->message);
+ 		g_hash_table_remove (priv->bss_proxies,
+ 		                     g_dbus_proxy_get_object_path (proxy));
+diff --git a/src/supplicant/tests/test-supplicant-config.c b/src/supplicant/tests/test-supplicant-config.c
+index 47e22c4..2583e8f 100644
+--- a/src/supplicant/tests/test-supplicant-config.c
++++ b/src/supplicant/tests/test-supplicant-config.c
+@@ -530,7 +530,7 @@ test_wifi_eap (void)
+ 	nm_connection_add_setting (connection, NM_SETTING (s_8021x));
+ 	nm_setting_802_1x_add_eap_method (s_8021x, "tls");
+ 	nm_setting_802_1x_set_client_cert (s_8021x, TEST_CERT_DIR "/test-cert.p12", NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
+-	nm_setting_802_1x_set_ca_cert (s_8021x, TEST_CERT_DIR "/test-ca-cert.pem", NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
++	g_assert (nm_setting_802_1x_set_ca_cert (s_8021x, TEST_CERT_DIR "/test-ca-cert.pem", NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL));
+ 	nm_setting_802_1x_set_private_key (s_8021x, TEST_CERT_DIR "/test-cert.p12", NULL, NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
+ 
+ 	/* IP4 setting */
+diff --git a/src/tests/test-resolvconf-capture.c b/src/tests/test-resolvconf-capture.c
+index ccbdafa..dc77c06 100644
+--- a/src/tests/test-resolvconf-capture.c
++++ b/src/tests/test-resolvconf-capture.c
+@@ -46,32 +46,14 @@ test_capture_empty (void)
+ 	g_array_free (ns6, TRUE);
+ }
+ 
+-static void
+-assert_dns4_entry (const GArray *a, guint i, const char *s)
+-{
+-	guint32 n, m;
+-
+-	g_assert (inet_aton (s, (void *) &n) != 0);
+-	m = g_array_index (a, guint32, i);
+-	g_assert_cmpint (m, ==, n);
+-}
++#define assert_dns4_entry(a, i, s) \
++	g_assert_cmpint ((g_array_index ((a), guint32, (i))), ==, nmtst_inet4_from_string (s));
+ 
+-static void
+-assert_dns6_entry (const GArray *a, guint i, const char *s)
+-{
+-	struct in6_addr n = IN6ADDR_ANY_INIT;
+-	struct in6_addr *m;
++#define assert_dns6_entry(a, i, s) \
++	g_assert (IN6_ARE_ADDR_EQUAL (&g_array_index ((a), struct in6_addr, (i)), nmtst_inet6_from_string (s)))
+ 
+-	g_assert (inet_pton (AF_INET6, s, (void *) &n) == 1);
+-	m = &g_array_index (a, struct in6_addr, i);
+-	g_assert (IN6_ARE_ADDR_EQUAL (&n, m));
+-}
+-
+-static void
+-assert_dns_option (GPtrArray *a, guint i, const char *s)
+-{
+-	g_assert_cmpstr (a->pdata[i], ==, s);
+-}
++#define assert_dns_option(a, i, s) \
++	g_assert_cmpstr ((a)->pdata[(i)], ==, (s));
+ 
+ static void
+ test_capture_basic4 (void)

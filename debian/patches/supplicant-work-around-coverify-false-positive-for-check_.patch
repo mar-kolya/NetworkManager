@@ -1,0 +1,35 @@
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 2 Jun 2017 19:53:43 +0200
+Subject: supplicant: work-around coverify false-positive for check_return:
+ g_async_initable_init_finish()
+
+  NetworkManager-1.8.0/src/supplicant/nm-supplicant-interface.c:232: check_return: Calling "g_async_initable_init_finish" without checking return value (as is done elsewhere 7 out of 8 times).
+---
+ src/supplicant/nm-supplicant-interface.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/supplicant/nm-supplicant-interface.c b/src/supplicant/nm-supplicant-interface.c
+index 84ac640..ddbc868 100644
+--- a/src/supplicant/nm-supplicant-interface.c
++++ b/src/supplicant/nm-supplicant-interface.c
+@@ -235,15 +235,17 @@ bss_proxy_acquired_cb (GDBusProxy *proxy, GAsyncResult *result, gpointer user_da
+ 	GVariant *props = NULL;
+ 	const char *object_path;
+ 	BssData *bss_data;
++	gboolean success;
+ 
+-	g_async_initable_init_finish (G_ASYNC_INITABLE (proxy), result, &error);
+-	if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++	success = g_async_initable_init_finish (G_ASYNC_INITABLE (proxy), result, &error);
++	if (   !success
++	    && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+ 		return;
+ 
+ 	self = NM_SUPPLICANT_INTERFACE (user_data);
+ 	priv = NM_SUPPLICANT_INTERFACE_GET_PRIVATE (self);
+ 
+-	if (error) {
++	if (!success) {
+ 		_LOGD ("failed to acquire BSS proxy: (%s)", error->message);
+ 		g_hash_table_remove (priv->bss_proxies,
+ 		                     g_dbus_proxy_get_object_path (proxy));

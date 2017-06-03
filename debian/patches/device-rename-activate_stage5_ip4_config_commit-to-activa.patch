@@ -12,7 +12,7 @@ Note, this affects logging, as we log the function name.
  1 file changed, 4 insertions(+), 4 deletions(-)
 
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index e11b715..ce21a56 100644
+index fe81478..b5d3af6 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -8268,7 +8268,7 @@ arp_announce (NMDevice *self)

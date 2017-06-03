@@ -10,7 +10,7 @@ match.
  2 files changed, 18 insertions(+), 1 deletion(-)
 
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index ce21a56..1d8ca03 100644
+index b5d3af6..6d26ef8 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -13464,6 +13464,12 @@ nm_device_get_initial_hw_address (NMDevice *self)

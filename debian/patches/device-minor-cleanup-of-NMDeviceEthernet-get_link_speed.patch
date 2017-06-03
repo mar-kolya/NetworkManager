@@ -1,0 +1,47 @@
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 2 Jun 2017 16:30:43 +0200
+Subject: device: minor cleanup of NMDeviceEthernet:get_link_speed()
+
+A better name is link_speed_update(), because it re-reads and
+sets the speed value.
+
+Also, move _notfiy() after logging. It doesn't matter in this
+case, but we should first log, and then do actions that have potentially
+complex side-effects.
+---
+ src/devices/nm-device-ethernet.c | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/src/devices/nm-device-ethernet.c b/src/devices/nm-device-ethernet.c
+index 5b15d48..8044ec3 100644
+--- a/src/devices/nm-device-ethernet.c
++++ b/src/devices/nm-device-ethernet.c
+@@ -1560,7 +1560,7 @@ update_connection (NMDevice *device, NMConnection *connection)
+ }
+ 
+ static void
+-get_link_speed (NMDevice *device)
++link_speed_update (NMDevice *device)
+ {
+ 	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (device);
+ 	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+@@ -1572,9 +1572,8 @@ get_link_speed (NMDevice *device)
+ 		return;
+ 
+ 	priv->speed = speed;
+-	_notify (self, PROP_SPEED);
+-
+ 	_LOGD (LOGD_PLATFORM | LOGD_ETHER, "speed is now %d Mb/s", speed);
++	_notify (self, PROP_SPEED);
+ }
+ 
+ static void
+@@ -1593,7 +1592,7 @@ carrier_changed_notify (NMDevice *device, gboolean carrier)
+ 	}
+ 
+ 	if (carrier)
+-		get_link_speed (device);
++		link_speed_update (device);
+ 
+ 	NM_DEVICE_CLASS (nm_device_ethernet_parent_class)->carrier_changed_notify (device, carrier);
+ }

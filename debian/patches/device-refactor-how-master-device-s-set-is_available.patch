@@ -7,10 +7,13 @@ would overwrite is_available() and check_connection_available()
 and always return TRUE.
 
 The device already expresses via nm_device_is_master() that it
-is of a master kind. Refactor the code, to instead let the parent
-class always return TRUE, instead of overwriting it in the subclasses.
+is of a master kind. Refactor the code, so, instead of having these
+device types overwrite is_available() and check_connection_available(),
+let the parents implementation react on nm_device_is_master().
 
-There is no change in behavior at all.
+There is no change in behavior at all. Instead, the knowledge how to
+treat a master device moves from the device implementation to the
+parent class.
 ---
  src/devices/nm-device-bond.c      | 20 --------------------
  src/devices/nm-device-bridge.c    | 13 +++----------
@@ -97,7 +100,7 @@ index 166e1bd..6da55b7 100644
  	parent_class->check_connection_available = check_connection_available;
  	parent_class->complete_connection = complete_connection;
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index 0acf543..c62e033 100644
+index a052dc3..521c403 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -3705,12 +3705,17 @@ is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)

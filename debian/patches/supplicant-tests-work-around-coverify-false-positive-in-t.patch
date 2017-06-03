@@ -1,0 +1,22 @@
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 2 Jun 2017 19:51:05 +0200
+Subject: supplicant/tests: work-around coverify false-positive in test
+
+  NetworkManager-1.8.0/src/supplicant/tests/test-supplicant-config.c:528: check_return: Calling "nm_setting_802_1x_set_ca_cert" without checking return value (as is done elsewhere 13 out of 16 times).
+---
+ src/supplicant/tests/test-supplicant-config.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/supplicant/tests/test-supplicant-config.c b/src/supplicant/tests/test-supplicant-config.c
+index 47e22c4..2583e8f 100644
+--- a/src/supplicant/tests/test-supplicant-config.c
++++ b/src/supplicant/tests/test-supplicant-config.c
+@@ -530,7 +530,7 @@ test_wifi_eap (void)
+ 	nm_connection_add_setting (connection, NM_SETTING (s_8021x));
+ 	nm_setting_802_1x_add_eap_method (s_8021x, "tls");
+ 	nm_setting_802_1x_set_client_cert (s_8021x, TEST_CERT_DIR "/test-cert.p12", NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
+-	nm_setting_802_1x_set_ca_cert (s_8021x, TEST_CERT_DIR "/test-ca-cert.pem", NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
++	g_assert (nm_setting_802_1x_set_ca_cert (s_8021x, TEST_CERT_DIR "/test-ca-cert.pem", NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL));
+ 	nm_setting_802_1x_set_private_key (s_8021x, TEST_CERT_DIR "/test-cert.p12", NULL, NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
+ 
+ 	/* IP4 setting */

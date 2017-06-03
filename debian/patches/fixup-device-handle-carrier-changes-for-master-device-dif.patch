@@ -1,0 +1,37 @@
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 2 Jun 2017 16:49:56 +0200
+Subject: fixup! device: handle carrier changes for master device differently
+
+---
+ src/devices/nm-device.c | 17 ++---------------
+ 1 file changed, 2 insertions(+), 15 deletions(-)
+
+diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
+index d091f19..ba09bb4 100644
+--- a/src/devices/nm-device.c
++++ b/src/devices/nm-device.c
+@@ -2202,22 +2202,9 @@ carrier_changed (NMDevice *self, gboolean carrier)
+ 				if (nm_device_activate_ip6_state_in_wait (self))
+ 					nm_device_activate_stage3_ip6_start (self);
+ 			}
+-		} else {
+-			 /* Put master device into DISCONNECTED state if there is
+-			  * no carrier. This would mean that all slaves are still
+-			  * enslaved. This is nessesary to be able to reconnect
+-			  * when carrier appears.
+-			  */
+-			if (priv->state == NM_DEVICE_STATE_DISCONNECTED) {
+-				if (   priv->queued_state.id
+-				    && priv->queued_state.state >= NM_DEVICE_STATE_PREPARE)
+-					queued_state_clear (self);
+-			} else {
+-				nm_device_queue_state (self, NM_DEVICE_STATE_DISCONNECTED,
+-				                       NM_DEVICE_STATE_REASON_CARRIER);
+-			}
++			return;
+ 		}
+-		return;
++		/* fall-through and change state of device */
+ 	} else if (priv->is_enslaved && !carrier) {
+ 		/* Slaves don't deactivate when they lose carrier; for
+ 		 * bonds/teams in particular that would be actively

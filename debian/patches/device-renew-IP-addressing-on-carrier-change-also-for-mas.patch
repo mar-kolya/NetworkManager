@@ -1,0 +1,42 @@
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 2 Jun 2017 11:11:50 +0200
+Subject: device: renew IP addressing on carrier change also for master devices
+
+Commit 348452f1e06e9bde9f84b90db4f5620ee672389a (device: renew DHCP
+lease for active "ignore-carrier" devices on carrier-on (bgo #743368))
+added this behavior for non-master devices.
+
+The same reasoning applies here too.
+
+https://github.com/NetworkManager/NetworkManager/pull/18
+
+Based-on-patch-by: Nikolay Martynov <mar.kolya@gmail.com>
+---
+ src/devices/nm-device.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
+index 521c403..0058814 100644
+--- a/src/devices/nm-device.c
++++ b/src/devices/nm-device.c
+@@ -2198,10 +2198,16 @@ carrier_changed (NMDevice *self, gboolean carrier)
+ 		if (!carrier)
+ 			return;
+ 
+-		if (nm_device_activate_ip4_state_in_wait (self))
+-			nm_device_activate_stage3_ip4_start (self);
+-		if (nm_device_activate_ip6_state_in_wait (self))
+-			nm_device_activate_stage3_ip6_start (self);
++		/* Force master to retry getting ip addresses when carrier
++		 * is restored. */
++		if (priv->state == NM_DEVICE_STATE_ACTIVATED)
++			nm_device_update_dynamic_ip_setup (self);
++		else {
++			if (nm_device_activate_ip4_state_in_wait (self))
++				nm_device_activate_stage3_ip4_start (self);
++			if (nm_device_activate_ip6_state_in_wait (self))
++				nm_device_activate_stage3_ip6_start (self);
++		}
+ 
+ 		return;
+ 	} else if (priv->is_enslaved && !carrier) {

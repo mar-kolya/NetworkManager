@@ -71,7 +71,7 @@ index c281dba..166e1bd 100644
  }
  
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index 1d8ca03..84db684 100644
+index 6d26ef8..de3bc68 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -188,7 +188,6 @@ NM_GOBJECT_PROPERTIES_DEFINE (NMDevice,
@@ -90,7 +90,7 @@ index 1d8ca03..84db684 100644
  	CList           slaves;    /* list of SlaveInfo */
  
  	NMMetered       metered;
-@@ -2194,7 +2192,7 @@ carrier_changed (NMDevice *self, gboolean carrier)
+@@ -2192,7 +2190,7 @@ carrier_changed (NMDevice *self, gboolean carrier)
  	if (priv->ignore_carrier && !carrier)
  		return;
  

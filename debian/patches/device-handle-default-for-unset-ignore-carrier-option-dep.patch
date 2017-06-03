@@ -1,13 +1,14 @@
 From: Thomas Haller <thaller@redhat.com>
 Date: Thu, 1 Jun 2017 22:38:51 +0200
-Subject: device: handle unset ignore-carrier option depending on device
+Subject: device: handle default for unset ignore-carrier option depending on
+ device
 
 Currently, device types like Bond hack around ignore-carrier
 setting, as they always want to ignore-carrier.
 
-Prepare so that also for such master types, we relying more on
-ignore-carrier. In the next commit they will get ignore-carrier
-turned on by default.
+Prepare so that also for such master types, we rely and honor the
+ignore-carrier setting better. In the next commit, bond, bridge and
+team devices they will get ignore-carrier turned on by default.
 ---
  src/devices/nm-device.c |  8 ++++++++
  src/devices/nm-device.h |  2 ++
@@ -15,7 +16,7 @@ turned on by default.
  3 files changed, 19 insertions(+), 2 deletions(-)
 
 diff --git a/src/devices/nm-device.c b/src/devices/nm-device.c
-index 84db684..0acf543 100644
+index de3bc68..a052dc3 100644
 --- a/src/devices/nm-device.c
 +++ b/src/devices/nm-device.c
 @@ -3745,6 +3745,14 @@ nm_device_is_available (NMDevice *self, NMDeviceCheckDevAvailableFlags flags)
