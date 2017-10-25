@@ -12,5 +12,4 @@ Ignore-p2p0-wifi-devices-from-android.patch
 Track-killswitch-change-signals-from-urfkill.patch
 Only-test-team-devices-if-we-built-support-for-them.patch
 Disable-general-with-expect.patch
-dns-manager-don-t-merge-split-DNS-search-domains.patch
 Read-system-connections-from-run.patch
