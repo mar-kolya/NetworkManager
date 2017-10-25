@@ -1,6 +1,6 @@
-network-manager (1.9.1-dev-1~5.gbpd1ab6f) UNRELEASED; urgency=medium
+network-manager (1.9.2-dev-1kolya1~1.gbp6e0d71) UNRELEASED; urgency=medium
 
-  ** SNAPSHOT build @d1ab6ffc3e1184eb9a1ba124d75dc5befa34f697 **
+  ** SNAPSHOT build @6e0d718822f08b11e36d9ed2c745976b6c0d0570 **
 
   * UNRELEASED
   * Update changelog for 1.9.1-dev-1~1.gbpb71ac8 release
@@ -8,8 +8,34 @@ network-manager (1.9.1-dev-1~5.gbpd1ab6f) UNRELEASED; urgency=medium
   * Rediff patches
   * Update changelog for 1.9.1-dev-1~4.gbp9653de release
   * Rediff patches
+  * Update changelog for 1.9.1-dev-1~5.gbpd1ab6f release
+  * Bond: add support for cloned mac
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
+  * Rediff patches
 
- -- Nikolay Martynov <mar.kolya@gmail.com>  Sun, 21 May 2017 16:40:48 -0400
+ -- Nikolay Martynov <mar.kolya@gmail.com>  Tue, 24 Oct 2017 21:51:07 -0400
 
 network-manager (1.8.0-1kolya1) zesty; urgency=medium
 
