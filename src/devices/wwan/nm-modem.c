@@ -32,7 +32,6 @@
 #include "nm-setting-connection.h"
 #include "NetworkManagerUtils.h"
 #include "devices/nm-device-private.h"
-#include "nm-route-manager.h"
 #include "nm-netns.h"
 #include "nm-act-request.h"
 #include "nm-ip4-config.h"
@@ -682,7 +681,7 @@ nm_modem_ip4_pre_commit (NMModem *modem,
 	 */
 	if (   priv->ip4_method == NM_MODEM_IP_METHOD_STATIC
 	    || priv->ip4_method == NM_MODEM_IP_METHOD_AUTO) {
-		const NMPlatformIP4Address *address = nm_ip4_config_get_address (config, 0);
+		const NMPlatformIP4Address *address = nm_ip4_config_get_first_address (config);
 
 		g_assert (address);
 		if (address->plen == 32)
@@ -698,7 +697,8 @@ nm_modem_emit_ip6_config_result (NMModem *self,
                                  GError *error)
 {
 	NMModemPrivate *priv = NM_MODEM_GET_PRIVATE (self);
-	guint i, num;
+	NMDedupMultiIter ipconf_iter;
+	const NMPlatformIP6Address *addr;
 	gboolean do_slaac = TRUE;
 
 	if (error) {
@@ -710,11 +710,7 @@ nm_modem_emit_ip6_config_result (NMModem *self,
 		/* If the IPv6 configuration only included a Link-Local address, then
 		 * we have to run SLAAC to get the full IPv6 configuration.
 		 */
-		num = nm_ip6_config_get_num_addresses (config);
-		g_assert (num > 0);
-		for (i = 0; i < num; i++) {
-			const NMPlatformIP6Address * addr = nm_ip6_config_get_address (config, i);
-
+		nm_ip_config_iter_ip6_address_for_each (&ipconf_iter, config, &addr) {
 			if (IN6_IS_ADDR_LINKLOCAL (&addr->address)) {
 				if (!priv->iid.id)
 					priv->iid.id = ((guint64 *)(&addr->address.s6_addr))[1];
@@ -1069,10 +1065,11 @@ deactivate_cleanup (NMModem *self, NMDevice *device)
 		    priv->ip6_method == NM_MODEM_IP_METHOD_AUTO) {
 			ifindex = nm_device_get_ip_ifindex (device);
 			if (ifindex > 0) {
-				nm_route_manager_route_flush (nm_netns_get_route_manager (nm_device_get_netns (device)),
-				                              ifindex);
-				nm_platform_address_flush (nm_device_get_platform (device), ifindex);
-				nm_platform_link_set_down (nm_device_get_platform (device), ifindex);
+				NMPlatform *platform = nm_device_get_platform (device);
+
+				nm_platform_ip_route_flush (platform, AF_UNSPEC, ifindex);
+				nm_platform_ip_address_flush (platform, AF_UNSPEC, ifindex);
+				nm_platform_link_set_down (platform, ifindex);
 			}
 		}
 	}

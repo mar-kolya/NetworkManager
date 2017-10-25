@@ -236,6 +236,15 @@ create_and_realize (NMDevice *device,
 		return FALSE;
 	}
 
+	parent_ifindex = nm_device_get_ifindex (parent);
+	if (parent_ifindex <= 0) {
+		g_set_error (error, NM_DEVICE_ERROR, NM_DEVICE_ERROR_FAILED,
+		             "cannot retrieve ifindex of interface %s (%s): skip VLAN creation for now",
+		             nm_device_get_iface (parent),
+		             nm_device_get_type_desc (parent));
+		return FALSE;
+	}
+
 	if (!nm_device_supports_vlans (parent)) {
 		g_set_error (error, NM_DEVICE_ERROR, NM_DEVICE_ERROR_FAILED,
 		             "no support for VLANs on interface %s of type %s",
@@ -243,9 +252,6 @@ create_and_realize (NMDevice *device,
 		             nm_device_get_type_desc (parent));
 		return FALSE;
 	}
-
-	parent_ifindex = nm_device_get_ifindex (parent);
-	g_warn_if_fail (parent_ifindex > 0);
 
 	vlan_id = nm_setting_vlan_get_id (s_vlan);
 
@@ -260,7 +266,7 @@ create_and_realize (NMDevice *device,
 		             "Failed to create VLAN interface '%s' for '%s': %s",
 		             iface,
 		             nm_connection_get_id (connection),
-		             nm_platform_error_to_string (plerr));
+		             nm_platform_error_to_string_a (plerr));
 		return FALSE;
 	}
 
@@ -586,7 +592,7 @@ get_configured_mtu (NMDevice *self, gboolean *out_is_user_config)
 	if (ifindex > 0)
 		mtu = nm_platform_link_get_mtu (nm_device_get_platform (NM_DEVICE (self)), ifindex);
 
-	return mtu ?: NM_DEVICE_DEFAULT_MTU_WIRED;
+	return mtu;
 }
 
 /*****************************************************************************/

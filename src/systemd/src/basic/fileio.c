@@ -43,6 +43,7 @@
 #include "missing.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "process-util.h"
 #include "random-util.h"
 #include "stdio-util.h"
 #include "string-util.h"
@@ -53,7 +54,7 @@
 
 #define READ_FULL_BYTES_MAX (4U*1024U*1024U)
 
-int write_string_stream(FILE *f, const char *line, bool enforce_newline) {
+int write_string_stream_ts(FILE *f, const char *line, bool enforce_newline, struct timespec *ts) {
 
         assert(f);
         assert(line);
@@ -62,10 +63,17 @@ int write_string_stream(FILE *f, const char *line, bool enforce_newline) {
         if (enforce_newline && !endswith(line, "\n"))
                 fputc('\n', f);
 
+        if (ts) {
+                struct timespec twice[2] = {*ts, *ts};
+
+                if (futimens(fileno(f), twice) < 0)
+                        return -errno;
+        }
+
         return fflush_and_check(f);
 }
 
-static int write_string_file_atomic(const char *fn, const char *line, bool enforce_newline) {
+static int write_string_file_atomic(const char *fn, const char *line, bool enforce_newline, bool do_fsync) {
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *p = NULL;
         int r;
@@ -80,6 +88,9 @@ static int write_string_file_atomic(const char *fn, const char *line, bool enfor
         (void) fchmod_umask(fileno(f), 0644);
 
         r = write_string_stream(f, line, enforce_newline);
+        if (r >= 0 && do_fsync)
+                r = fflush_sync_and_check(f);
+
         if (r >= 0) {
                 if (rename(p, fn) < 0)
                         r = -errno;
@@ -91,22 +102,27 @@ static int write_string_file_atomic(const char *fn, const char *line, bool enfor
         return r;
 }
 
-int write_string_file(const char *fn, const char *line, WriteStringFileFlags flags) {
+int write_string_file_ts(const char *fn, const char *line, WriteStringFileFlags flags, struct timespec *ts) {
         _cleanup_fclose_ FILE *f = NULL;
         int q, r;
 
         assert(fn);
         assert(line);
 
+        /* We don't know how to verify whether the file contents was already on-disk. */
+        assert(!((flags & WRITE_STRING_FILE_VERIFY_ON_FAILURE) && (flags & WRITE_STRING_FILE_SYNC)));
+
         if (flags & WRITE_STRING_FILE_ATOMIC) {
                 assert(flags & WRITE_STRING_FILE_CREATE);
 
-                r = write_string_file_atomic(fn, line, !(flags & WRITE_STRING_FILE_AVOID_NEWLINE));
+                r = write_string_file_atomic(fn, line, !(flags & WRITE_STRING_FILE_AVOID_NEWLINE),
+                                                       flags & WRITE_STRING_FILE_SYNC);
                 if (r < 0)
                         goto fail;
 
                 return r;
-        }
+        } else
+                assert(ts == NULL);
 
         if (flags & WRITE_STRING_FILE_CREATE) {
                 f = fopen(fn, "we");
@@ -133,9 +149,15 @@ int write_string_file(const char *fn, const char *line, WriteStringFileFlags fla
                 }
         }
 
-        r = write_string_stream(f, line, !(flags & WRITE_STRING_FILE_AVOID_NEWLINE));
+        r = write_string_stream_ts(f, line, !(flags & WRITE_STRING_FILE_AVOID_NEWLINE), ts);
         if (r < 0)
                 goto fail;
+
+        if (flags & WRITE_STRING_FILE_SYNC) {
+                r = fflush_sync_and_check(f);
+                if (r < 0)
+                        return r;
+        }
 
         return 0;
 
@@ -818,29 +840,29 @@ static void write_env_var(FILE *f, const char *v) {
         p = strchr(v, '=');
         if (!p) {
                 /* Fallback */
-                fputs(v, f);
-                fputc('\n', f);
+                fputs_unlocked(v, f);
+                fputc_unlocked('\n', f);
                 return;
         }
 
         p++;
-        fwrite(v, 1, p-v, f);
+        fwrite_unlocked(v, 1, p-v, f);
 
         if (string_has_cc(p, NULL) || chars_intersect(p, WHITESPACE SHELL_NEED_QUOTES)) {
-                fputc('\"', f);
+                fputc_unlocked('\"', f);
 
                 for (; *p; p++) {
                         if (strchr(SHELL_NEED_ESCAPE, *p))
-                                fputc('\\', f);
+                                fputc_unlocked('\\', f);
 
-                        fputc(*p, f);
+                        fputc_unlocked(*p, f);
                 }
 
-                fputc('\"', f);
+                fputc_unlocked('\"', f);
         } else
-                fputs(p, f);
+                fputs_unlocked(p, f);
 
-        fputc('\n', f);
+        fputc_unlocked('\n', f);
 }
 
 int write_env_file(const char *fname, char **l) {
@@ -1123,6 +1145,21 @@ int fflush_and_check(FILE *f) {
         return 0;
 }
 
+int fflush_sync_and_check(FILE *f) {
+        int r;
+
+        assert(f);
+
+        r = fflush_and_check(f);
+        if (r < 0)
+                return r;
+
+        if (fsync(fileno(f)) < 0)
+                return -errno;
+
+        return 0;
+}
+
 /* This is much like mkostemp() but is subject to umask(). */
 int mkostemp_safe(char *pattern) {
         _cleanup_umask_ mode_t u = 0;
@@ -1400,7 +1437,7 @@ int open_serialization_fd(const char *ident) {
         if (fd < 0) {
                 const char *path;
 
-                path = getpid() == 1 ? "/run/systemd" : "/tmp";
+                path = getpid_cached() == 1 ? "/run/systemd" : "/tmp";
                 fd = open_tmpfile_unlinkable(path, O_RDWR|O_CLOEXEC);
                 if (fd < 0)
                         return fd;

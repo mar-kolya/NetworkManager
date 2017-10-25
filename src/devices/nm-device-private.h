@@ -57,6 +57,8 @@ gboolean nm_device_bring_up (NMDevice *self, gboolean wait, gboolean *no_firmwar
 
 void nm_device_take_down (NMDevice *self, gboolean block);
 
+gboolean nm_device_take_over_link (NMDevice *self, const char *ifname);
+
 gboolean nm_device_hw_addr_set (NMDevice *device,
                                 const char *addr,
                                 const char *detail,
@@ -111,10 +113,6 @@ void nm_device_ip_method_failed (NMDevice *self, int family, NMDeviceStateReason
 gboolean nm_device_ipv6_sysctl_set (NMDevice *self, const char *property, const char *value);
 
 /*****************************************************************************/
-
-#define NM_DEVICE_DEFAULT_MTU_WIRED          ((guint32) 1500)
-#define NM_DEVICE_DEFAULT_MTU_WIRELESS       ((guint32) 1500)
-#define NM_DEVICE_DEFAULT_MTU_INFINIBAND     ((guint32) 0)
 
 gint64 nm_device_get_configured_mtu_from_connection_default (NMDevice *self,
                                                              const char *property_name);

@@ -46,7 +46,7 @@
  **/
 
 G_DEFINE_TYPE_WITH_CODE (NMSettingConnection, nm_setting_connection, NM_TYPE_SETTING,
-                         _nm_register_setting (CONNECTION, 0))
+                         _nm_register_setting (CONNECTION, NM_SETTING_PRIORITY_CONNECTION))
 NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_CONNECTION)
 
 #define NM_SETTING_CONNECTION_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_CONNECTION, NMSettingConnectionPrivate))
@@ -926,7 +926,8 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 		}
 
 		base_type = nm_setting_lookup_type (priv->type);
-		if (base_type == G_TYPE_INVALID || !_nm_setting_type_get_base_type_priority (base_type)) {
+		if (   base_type == G_TYPE_INVALID
+		    || _nm_setting_type_get_base_type_priority (base_type) == NM_SETTING_PRIORITY_INVALID) {
 			g_set_error (error,
 			             NM_CONNECTION_ERROR,
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
@@ -1561,9 +1562,10 @@ nm_setting_connection_class_init (NMSettingConnectionClass *setting_class)
 	 *
 	 * An array of strings defining what access a given user has to this
 	 * connection.  If this is %NULL or empty, all users are allowed to access
-	 * this connection.  Otherwise a user is allowed to access this connection
-	 * if and only if they are in this list. Each entry is of the form
-	 * "[type]:[id]:[reserved]"; for example, "user:dcbw:blah".
+	 * this connection; otherwise users are allowed if and only if they are in
+	 * this list.  When this is not empty, the connection can be active only when
+	 * one of the specified users is logged into an active session.  Each entry
+	 * is of the form "[type]:[id]:[reserved]"; for example, "user:dcbw:blah".
 	 *
 	 * At this time only the "user" [type] is allowed.  Any other values are
 	 * ignored and reserved for future use.  [id] is the username that this
@@ -1574,8 +1576,9 @@ nm_setting_connection_class_init (NMSettingConnectionClass *setting_class)
 	/* ---ifcfg-rh---
 	 * property: permissions
 	 * variable: USERS(+)
-	 * description: USERS restrict the access for this conenction to certain
-	 *   users only.
+	 * description: Restrict to certain users the access to this connection, and
+	 *     allow the connection to be active only when at least one of the
+	 *     specified users is logged into an active session.
 	 * example: USERS="joe bob"
 	 * ---end---
 	 */

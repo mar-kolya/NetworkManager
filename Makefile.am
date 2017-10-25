@@ -34,7 +34,6 @@ dist_dependencies =
 dist_configure_check =
 install_data_hook =
 install_exec_hook =
-install_exec_local =
 uninstall_hook =
 TESTS =
 BUILT_SOURCES =
@@ -207,6 +206,8 @@ introspection_sources = \
 	introspection/org.freedesktop.NetworkManager.Device.Modem.h \
 	introspection/org.freedesktop.NetworkManager.Device.OlpcMesh.c \
 	introspection/org.freedesktop.NetworkManager.Device.OlpcMesh.h \
+	introspection/org.freedesktop.NetworkManager.Device.Ppp.c \
+	introspection/org.freedesktop.NetworkManager.Device.Ppp.h \
 	introspection/org.freedesktop.NetworkManager.Device.Statistics.c \
 	introspection/org.freedesktop.NetworkManager.Device.Statistics.h \
 	introspection/org.freedesktop.NetworkManager.Device.Team.c \
@@ -280,6 +281,7 @@ DBUS_INTERFACE_DOCS = \
 	docs/api/dbus-org.freedesktop.NetworkManager.Device.Tun.xml \
 	docs/api/dbus-org.freedesktop.NetworkManager.Device.Bridge.xml \
 	docs/api/dbus-org.freedesktop.NetworkManager.Device.OlpcMesh.xml \
+	docs/api/dbus-org.freedesktop.NetworkManager.Device.Ppp.xml \
 	docs/api/dbus-org.freedesktop.NetworkManager.DHCP4Config.xml \
 	docs/api/dbus-org.freedesktop.NetworkManager.Device.Generic.xml \
 	docs/api/dbus-org.freedesktop.NetworkManager.Device.Infiniband.xml \
@@ -327,6 +329,7 @@ dbusinterfaces_DATA = \
 	introspection/org.freedesktop.NetworkManager.Device.Macvlan.xml \
 	introspection/org.freedesktop.NetworkManager.Device.Modem.xml \
 	introspection/org.freedesktop.NetworkManager.Device.OlpcMesh.xml \
+	introspection/org.freedesktop.NetworkManager.Device.Ppp.xml \
 	introspection/org.freedesktop.NetworkManager.Device.Statistics.xml \
 	introspection/org.freedesktop.NetworkManager.Device.Team.xml \
 	introspection/org.freedesktop.NetworkManager.Device.Tun.xml \
@@ -415,6 +418,8 @@ libnm_core_lib_h_pub_real = \
 libnm_core_lib_h_pub_mkenums = \
 	libnm-core/nm-core-enum-types.h
 libnm_core_lib_h_priv = \
+	shared/nm-utils/c-list-util.h \
+	shared/nm-utils/nm-dedup-multi.h \
 	shared/nm-utils/nm-enum-utils.h \
 	shared/nm-utils/nm-shared-utils.h \
 	shared/nm-utils/nm-udev-utils.h \
@@ -429,6 +434,8 @@ libnm_core_lib_h_priv = \
 	libnm-core/nm-setting-private.h \
 	libnm-core/nm-utils-private.h
 libnm_core_lib_c_real = \
+	shared/nm-utils/c-list-util.c \
+	shared/nm-utils/nm-dedup-multi.c \
 	shared/nm-utils/nm-enum-utils.c \
 	shared/nm-utils/nm-shared-utils.c \
 	shared/nm-utils/nm-udev-utils.c \
@@ -616,6 +623,9 @@ GLIB_GENERATED += \
 	libnm-core/tests/nm-core-tests-enum-types.c
 nm_core_tests_enum_types_sources = libnm-core/tests/test-general-enums.h
 
+libnm-core/tests/nm-core-tests-enum-types.h.stamp: libnm-core/tests/.dirstamp
+libnm-core/tests/nm-core-tests-enum-types.c.stamp: libnm-core/tests/.dirstamp
+
 $(libnm_core_tests_test_general_OBJECTS): libnm-core/tests/nm-core-tests-enum-types.h
 
 libnm_core_tests_cppflags = \
@@ -715,6 +725,7 @@ libnm_lib_h_pub_real = \
 	libnm/nm-device-macvlan.h \
 	libnm/nm-device-modem.h \
 	libnm/nm-device-olpc-mesh.h \
+	libnm/nm-device-ppp.h \
 	libnm/nm-device-team.h \
 	libnm/nm-device-tun.h \
 	libnm/nm-device-vlan.h \
@@ -767,6 +778,7 @@ libnm_lib_c_real = \
 	libnm/nm-device-macvlan.c \
 	libnm/nm-device-modem.c \
 	libnm/nm-device-olpc-mesh.c \
+	libnm/nm-device-ppp.c \
 	libnm/nm-device-team.c \
 	libnm/nm-device-tun.c \
 	libnm/nm-device-vlan.c \
@@ -1128,6 +1140,7 @@ src_libsystemd_nm_la_SOURCES = \
 	src/systemd/nm-sd.h \
 	src/systemd/sd-adapt/nm-sd-adapt.c \
 	src/systemd/sd-adapt/nm-sd-adapt.h \
+	src/systemd/sd-adapt/architecture.h \
 	src/systemd/sd-adapt/build.h \
 	src/systemd/sd-adapt/cgroup-util.h \
 	src/systemd/sd-adapt/condition.h \
@@ -1137,11 +1150,12 @@ src_libsystemd_nm_la_SOURCES = \
 	src/systemd/sd-adapt/env-util.h \
 	src/systemd/sd-adapt/format-util.h \
 	src/systemd/sd-adapt/gunicode.h \
+	src/systemd/sd-adapt/ioprio.h \
 	src/systemd/sd-adapt/khash.h \
 	src/systemd/sd-adapt/libudev.h \
 	src/systemd/sd-adapt/missing.h \
 	src/systemd/sd-adapt/mkdir.h \
-	src/systemd/sd-adapt/process-util.h \
+	src/systemd/sd-adapt/raw-clone.h \
 	src/systemd/sd-adapt/sd-daemon.h \
 	src/systemd/sd-adapt/stat-util.h \
 	src/systemd/sd-adapt/udev-util.h \
@@ -1187,6 +1201,8 @@ src_libsystemd_nm_la_SOURCES = \
 	src/systemd/src/basic/path-util.h \
 	src/systemd/src/basic/prioq.c \
 	src/systemd/src/basic/prioq.h \
+	src/systemd/src/basic/process-util.c \
+	src/systemd/src/basic/process-util.h \
 	src/systemd/src/basic/random-util.c \
 	src/systemd/src/basic/random-util.h \
 	src/systemd/src/basic/refcnt.h \
@@ -1268,13 +1284,12 @@ $(src_libsystemd_nm_la_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
 src_libNetworkManagerBase_la_CPPFLAGS = $(src_cppflags)
 
 src_libNetworkManagerBase_la_SOURCES = \
+	\
 	src/nm-core-utils.c \
 	src/nm-core-utils.h \
 	src/nm-logging.c \
 	src/nm-logging.h \
 	\
-	src/nm-multi-index.c \
-	src/nm-multi-index.h \
 	src/NetworkManagerUtils.c \
 	src/NetworkManagerUtils.h \
 	\
@@ -1286,6 +1301,7 @@ src_libNetworkManagerBase_la_SOURCES = \
 	src/platform/nm-platform-utils.h \
 	src/platform/nm-platform.c \
 	src/platform/nm-platform.h \
+	src/platform/nm-platform-private.h \
 	src/platform/nm-linux-platform.c \
 	src/platform/nm-linux-platform.h \
 	src/platform/wifi/wifi-utils-nl80211.c \
@@ -1306,9 +1322,6 @@ src_libNetworkManagerBase_la_SOURCES = \
 	src/nm-ip4-config.h \
 	src/nm-ip6-config.c \
 	src/nm-ip6-config.h \
-	\
-	src/nm-route-manager.c \
-	src/nm-route-manager.h \
 	\
 	src/dhcp/nm-dhcp-client.c \
 	src/dhcp/nm-dhcp-client.h \
@@ -1382,6 +1395,8 @@ src_libNetworkManager_la_SOURCES = \
 	src/devices/nm-device-macsec.h \
 	src/devices/nm-device-macvlan.c \
 	src/devices/nm-device-macvlan.h \
+	src/devices/nm-device-ppp.c \
+	src/devices/nm-device-ppp.h \
 	src/devices/nm-device-tun.c \
 	src/devices/nm-device-tun.h \
 	src/devices/nm-device-veth.c \
@@ -2943,8 +2958,6 @@ check_programs += \
 	src/tests/test-general-with-expect \
 	src/tests/test-ip4-config \
 	src/tests/test-ip6-config \
-	src/tests/test-route-manager-linux \
-	src/tests/test-route-manager-fake \
 	src/tests/test-dcb \
 	src/tests/test-systemd \
 	src/tests/test-resolvconf-capture \
@@ -2991,28 +3004,6 @@ $(src_tests_test_general_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
 $(src_tests_test_general_with_expect_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
 $(src_tests_test_wired_defname_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
 $(src_tests_test_utils_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
-
-src_tests_test_route_manager_ldflags = \
-	$(CODE_COVERAGE_LDFLAGS)
-
-src_tests_test_route_manager_ldadd = \
-	src/libNetworkManagerTest.la \
-	$(GLIB_LIBS) \
-	$(LIBUDEV_LIBS) \
-	$(LIBNL_LIBS)
-
-src_tests_test_route_manager_fake_SOURCES = src/tests/test-route-manager.c
-src_tests_test_route_manager_fake_CPPFLAGS = $(src_tests_cppflags_fake)
-src_tests_test_route_manager_fake_LDFLAGS = $(src_tests_test_route_manager_ldflags)
-src_tests_test_route_manager_fake_LDADD = $(src_tests_test_route_manager_ldadd)
-
-src_tests_test_route_manager_linux_SOURCES = src/tests/test-route-manager.c
-src_tests_test_route_manager_linux_CPPFLAGS = $(src_tests_cppflags_linux)
-src_tests_test_route_manager_linux_LDFLAGS = $(src_tests_test_route_manager_ldflags)
-src_tests_test_route_manager_linux_LDADD = $(src_tests_test_route_manager_ldadd)
-
-$(src_tests_test_route_manager_fake_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
-$(src_tests_test_route_manager_linux_OBJECTS): $(libnm_core_lib_h_pub_mkenums)
 
 src_tests_test_systemd_CPPFLAGS = $(src_libsystemd_nm_la_cppflags)
 src_tests_test_systemd_LDADD = \
@@ -3598,12 +3589,6 @@ data/org.freedesktop.NetworkManager.service: $(srcdir)/data/org.freedesktop.Netw
 	$(AM_V_GEN) $(data_edit) $< >$@
 
 service_DATA += data/org.freedesktop.NetworkManager.service
-
-install-exec-local-data:
-	install -d $(DESTDIR)$(systemdsystemunitdir)/network-online.target.wants
-	ln -sf $(systemdsystemunitdir)/NetworkManager-wait-online.service $(DESTDIR)$(systemdsystemunitdir)/network-online.target.wants
-
-install_exec_local += install-exec-local-data
 
 endif
 
@@ -4439,8 +4424,11 @@ EXTRA_DIST += \
 	shared/nm-test-libnm-utils.h \
 	shared/nm-test-utils-impl.c \
 	shared/nm-utils/c-list.h \
+	shared/nm-utils/c-list-util.c \
+	shared/nm-utils/c-list-util.h \
 	shared/nm-utils/gsystem-local-alloc.h \
 	shared/nm-utils/nm-glib.h \
+	shared/nm-utils/nm-obj.h \
 	shared/nm-utils/nm-macros-internal.h \
 	shared/nm-utils/nm-shared-utils.c \
 	shared/nm-utils/nm-shared-utils.h \
@@ -4488,8 +4476,6 @@ dist-hook: $(dist_hook)
 ###############################################################################
 
 install-exec-hook: $(install_exec_hook)
-
-install-exec-local: $(install_exec_local)
 
 install-data-hook: $(install_data_hook)
 	$(mkinstalldirs) -m 0755 $(DESTDIR)$(nmconfdir)/conf.d

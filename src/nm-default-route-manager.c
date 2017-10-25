@@ -28,6 +28,8 @@
 #include "devices/nm-device.h"
 #include "vpn/nm-vpn-connection.h"
 #include "platform/nm-platform.h"
+#include "platform/nm-platform-utils.h"
+#include "platform/nmp-object.h"
 #include "nm-manager.h"
 #include "nm-ip4-config.h"
 #include "nm-ip6-config.h"
@@ -195,37 +197,31 @@ typedef struct {
 
 static const VTableIP vtable_ip4, vtable_ip6;
 
-static NMPlatformIPRoute *
-_vt_route_index (const VTableIP *vtable, GArray *routes, guint index)
-{
-	if (vtable->vt->is_ip4)
-		return (NMPlatformIPRoute *) &g_array_index (routes, NMPlatformIP4Route, index);
-	else
-		return (NMPlatformIPRoute *) &g_array_index (routes, NMPlatformIP6Route, index);
-}
-
 static gboolean
-_vt_routes_has_entry (const VTableIP *vtable, GArray *routes, const Entry *entry)
+_vt_routes_has_entry (const VTableIP *vtable, const GPtrArray *routes, const Entry *entry)
 {
 	guint i;
 	NMPlatformIPXRoute route = entry->route;
+
+	if (!routes)
+		return FALSE;
 
 	route.rx.metric = entry->effective_metric;
 
 	if (vtable->vt->is_ip4) {
 		for (i = 0; i < routes->len; i++) {
-			NMPlatformIP4Route *r = &g_array_index (routes, NMPlatformIP4Route, i);
+			const NMPlatformIP4Route *r = NMP_OBJECT_CAST_IP4_ROUTE (routes->pdata[i]);
 
 			route.rx.rt_source = r->rt_source;
-			if (nm_platform_ip4_route_cmp (r, &route.r4) == 0)
+			if (nm_platform_ip4_route_cmp_full (r, &route.r4) == 0)
 				return TRUE;
 		}
 	} else {
 		for (i = 0; i < routes->len; i++) {
-			NMPlatformIP6Route *r = &g_array_index (routes, NMPlatformIP6Route, i);
+			const NMPlatformIP6Route *r = NMP_OBJECT_CAST_IP6_ROUTE (routes->pdata[i]);
 
 			route.rx.rt_source = r->rt_source;
-			if (nm_platform_ip6_route_cmp (r, &route.r6) == 0)
+			if (nm_platform_ip6_route_cmp_full (r, &route.r6) == 0)
 				return TRUE;
 		}
 	}
@@ -266,6 +262,8 @@ _platform_route_sync_add (const VTableIP *vtable, NMDefaultRouteManager *self, g
 {
 	NMDefaultRouteManagerPrivate *priv = NM_DEFAULT_ROUTE_MANAGER_GET_PRIVATE (self);
 	GPtrArray *entries = vtable->get_entries (priv);
+	char buf1[sizeof (_nm_utils_to_string_buffer)];
+	char buf2[sizeof (_nm_utils_to_string_buffer)];
 	guint i;
 	Entry *entry_unsynced = NULL;
 	Entry *entry = NULL;
@@ -303,22 +301,69 @@ _platform_route_sync_add (const VTableIP *vtable, NMDefaultRouteManager *self, g
 		return FALSE;
 
 	if (vtable->vt->is_ip4) {
-		NMPlatformIP4Route rt = entry->route.r4;
+		NMPObject obj;
+		NMPlatformIP4Route *rt;
+		const NMPObject *plobj;
 
-		rt.network = 0;
-		rt.plen = 0;
-		rt.metric = entry->effective_metric;
+		nmp_object_stackinit (&obj, NMP_OBJECT_TYPE_IP4_ROUTE, (const NMPlatformObject *) &entry->route.r4);
+		rt = NMP_OBJECT_CAST_IP4_ROUTE (&obj);
+		rt->network = 0;
+		rt->plen = 0;
+		rt->metric = entry->effective_metric;
 
-		success = nm_platform_ip4_route_add (priv->platform, &rt);
+		nm_platform_ip_route_normalize (AF_INET, (NMPlatformIPRoute *) rt);
+		plobj = nm_dedup_multi_entry_get_obj (nm_platform_lookup_entry (priv->platform,
+		                                                                NMP_CACHE_ID_TYPE_OBJECT_TYPE,
+		                                                                &obj));
+		if (   plobj
+		    && nm_platform_ip4_route_cmp (rt,
+		                                  NMP_OBJECT_CAST_IP4_ROUTE (plobj),
+		                                  NM_PLATFORM_IP_ROUTE_CMP_TYPE_SEMANTICALLY) == 0) {
+			_LOGt (AF_INET, "already exists: %s",
+			       nm_platform_ip4_route_to_string (rt, NULL, 0));
+			return FALSE;
+		}
+
+		if (plobj) {
+			_LOGt (AF_INET, "update platform route: %s; with route: %s",
+			       nm_platform_ip4_route_to_string (NMP_OBJECT_CAST_IP4_ROUTE (plobj), buf1, sizeof (buf1)),
+			       nm_platform_ip4_route_to_string (rt, buf2, sizeof (buf2)));
+		}
+
+		success = (nm_platform_ip4_route_add (priv->platform, NMP_NLM_FLAG_REPLACE, rt) == NM_PLATFORM_ERROR_SUCCESS);
 	} else {
-		NMPlatformIP6Route rt = entry->route.r6;
+		NMPObject obj;
+		NMPlatformIP6Route *rt;
+		const NMPObject *plobj;
 
-		rt.network = in6addr_any;
-		rt.plen = 0;
-		rt.metric = entry->effective_metric;
+		nmp_object_stackinit (&obj, NMP_OBJECT_TYPE_IP6_ROUTE, (const NMPlatformObject *) &entry->route.r6);
+		rt = NMP_OBJECT_CAST_IP6_ROUTE (&obj);
+		rt->network = in6addr_any;
+		rt->plen = 0;
+		rt->metric = entry->effective_metric;
 
-		success = nm_platform_ip6_route_add (priv->platform, &rt);
+		nm_platform_ip_route_normalize (AF_INET6, (NMPlatformIPRoute *) rt);
+		plobj = nm_dedup_multi_entry_get_obj (nm_platform_lookup_entry (priv->platform,
+		                                                                NMP_CACHE_ID_TYPE_OBJECT_TYPE,
+		                                                                &obj));
+		if (   plobj
+		    && nm_platform_ip6_route_cmp (rt,
+		                                  NMP_OBJECT_CAST_IP6_ROUTE (plobj),
+		                                  NM_PLATFORM_IP_ROUTE_CMP_TYPE_SEMANTICALLY) == 0) {
+			_LOGt (AF_INET, "already exists: %s",
+			       nm_platform_ip6_route_to_string (rt, NULL, 0));
+			return FALSE;
+		}
+
+		if (plobj) {
+			_LOGt (AF_INET, "update platform route: %s; with route: %s",
+			       nm_platform_ip6_route_to_string (NMP_OBJECT_CAST_IP6_ROUTE (plobj), buf1, sizeof (buf1)),
+			       nm_platform_ip6_route_to_string (rt, buf2, sizeof (buf2)));
+		}
+
+		success = (nm_platform_ip6_route_add (priv->platform, NMP_NLM_FLAG_REPLACE, rt) == NM_PLATFORM_ERROR_SUCCESS);
 	}
+
 	if (!success) {
 		_LOGW (vtable->vt->addr_family, "failed to add default route %s with effective metric %u",
 		       vtable->vt->route_to_string (&entry->route, NULL, 0), (guint) entry->effective_metric);
@@ -331,19 +376,25 @@ _platform_route_sync_flush (const VTableIP *vtable, NMDefaultRouteManager *self,
 {
 	NMDefaultRouteManagerPrivate *priv = NM_DEFAULT_ROUTE_MANAGER_GET_PRIVATE (self);
 	GPtrArray *entries = vtable->get_entries (priv);
-	GArray *routes;
+	gs_unref_ptrarray GPtrArray *routes = NULL;
 	guint i, j;
 	gboolean changed = FALSE;
 
 	/* prune all other default routes from this device. */
-	routes = vtable->vt->route_get_all (priv->platform, 0, NM_PLATFORM_GET_ROUTE_FLAGS_WITH_DEFAULT);
+
+	routes = nm_platform_lookup_route_default_clone (priv->platform,
+	                                                 vtable->vt->obj_type,
+	                                                 nm_platform_lookup_predicate_routes_main_skip_rtprot_kernel,
+	                                                 NULL);
+	if (!routes)
+		return FALSE;
 
 	for (i = 0; i < routes->len; i++) {
 		const NMPlatformIPRoute *route;
 		gboolean has_ifindex_synced = FALSE;
 		Entry *entry = NULL;
 
-		route = _vt_route_index (vtable, routes, i);
+		route = NMP_OBJECT_CAST_IP_ROUTE (routes->pdata[i]);
 
 		/* look at all entries and see if the route for this ifindex pair is
 		 * a known entry. */
@@ -368,11 +419,10 @@ _platform_route_sync_flush (const VTableIP *vtable, NMDefaultRouteManager *self,
 		 */
 		if (   !entry
 		    && (has_ifindex_synced || ifindex_to_flush == route->ifindex)) {
-			vtable->vt->route_delete_default (priv->platform, route->ifindex, route->metric);
+			nm_platform_ip_route_delete (priv->platform, NMP_OBJECT_UP_CAST (route));
 			changed = TRUE;
 		}
 	}
-	g_array_free (routes, TRUE);
 	return changed;
 }
 
@@ -419,7 +469,7 @@ _sort_entries_cmp (gconstpointer a, gconstpointer b, gpointer user_data)
 }
 
 static GHashTable *
-_get_assumed_interface_metrics (const VTableIP *vtable, NMDefaultRouteManager *self, GArray *routes)
+_get_assumed_interface_metrics (const VTableIP *vtable, NMDefaultRouteManager *self, const GPtrArray *routes)
 {
 	NMDefaultRouteManagerPrivate *priv = NM_DEFAULT_ROUTE_MANAGER_GET_PRIVATE (self);
 	GPtrArray *entries;
@@ -435,24 +485,26 @@ _get_assumed_interface_metrics (const VTableIP *vtable, NMDefaultRouteManager *s
 
 	result = g_hash_table_new (NULL, NULL);
 
-	for (i = 0; i < routes->len; i++) {
-		gboolean ifindex_has_synced_entry = FALSE;
-		const NMPlatformIPRoute *route;
+	if (routes) {
+		for (i = 0; i < routes->len; i++) {
+			gboolean ifindex_has_synced_entry = FALSE;
+			const NMPlatformIPRoute *route;
 
-		route = _vt_route_index (vtable, routes, i);
+			route = NMP_OBJECT_CAST_IP_ROUTE (routes->pdata[i]);
 
-		for (j = 0; j < entries->len; j++) {
-			Entry *e = g_ptr_array_index (entries, j);
+			for (j = 0; j < entries->len; j++) {
+				Entry *e = g_ptr_array_index (entries, j);
 
-			if (   e->synced
-			    && e->route.rx.ifindex == route->ifindex) {
-				ifindex_has_synced_entry = TRUE;
-				break;
+				if (   e->synced
+				    && e->route.rx.ifindex == route->ifindex) {
+					ifindex_has_synced_entry = TRUE;
+					break;
+				}
 			}
-		}
 
-		if (!ifindex_has_synced_entry)
-			g_hash_table_add (result, GUINT_TO_POINTER (vtable->vt->metric_normalize (route->metric)));
+			if (!ifindex_has_synced_entry)
+				g_hash_table_add (result, GUINT_TO_POINTER (vtable->vt->metric_normalize (route->metric)));
+		}
 	}
 
 	/* also add all non-synced metrics from our entries list. We might have there some metrics that
@@ -493,7 +545,7 @@ _resync_all (const VTableIP *vtable, NMDefaultRouteManager *self, const Entry *c
 	GPtrArray *entries;
 	GArray *changed_metrics = g_array_new (FALSE, FALSE, sizeof (guint32));
 	GHashTable *assumed_metrics;
-	GArray *routes;
+	gs_unref_ptrarray GPtrArray *routes = NULL;
 	gboolean changed = FALSE;
 	int ifindex_to_flush = 0;
 
@@ -511,7 +563,10 @@ _resync_all (const VTableIP *vtable, NMDefaultRouteManager *self, const Entry *c
 
 	entries = vtable->get_entries (priv);
 
-	routes = vtable->vt->route_get_all (priv->platform, 0, NM_PLATFORM_GET_ROUTE_FLAGS_WITH_DEFAULT);
+	routes = nm_platform_lookup_route_default_clone (priv->platform,
+	                                                 vtable->vt->obj_type,
+	                                                 nm_platform_lookup_predicate_routes_main_skip_rtprot_kernel,
+	                                                 NULL);
 
 	assumed_metrics = _get_assumed_interface_metrics (vtable, self, routes);
 
@@ -560,13 +615,15 @@ _resync_all (const VTableIP *vtable, NMDefaultRouteManager *self, const Entry *c
 			 * If there are any, we have to pick another effective_metric. */
 
 			/* However, if there is a matching route (ifindex+metric) for our current entry, we are done. */
-			for (j = 0; j < routes->len; j++) {
-				const NMPlatformIPRoute *r = _vt_route_index (vtable, routes, i);
+			if (routes) {
+				for (j = 0; j < routes->len; j++) {
+					const NMPlatformIPRoute *r = NMP_OBJECT_CAST_IP_ROUTE (routes->pdata[i]);
 
-				if (   r->metric == expected_metric
-				    && r->ifindex == entry->route.rx.ifindex) {
-					has_metric_for_ifindex = TRUE;
-					break;
+					if (   r->metric == expected_metric
+					    && r->ifindex == entry->route.rx.ifindex) {
+						has_metric_for_ifindex = TRUE;
+						break;
+					}
 				}
 			}
 			if (has_metric_for_ifindex)
@@ -610,8 +667,6 @@ _resync_all (const VTableIP *vtable, NMDefaultRouteManager *self, const Entry *c
 		}
 		last_metric = expected_metric;
 	}
-
-	g_array_free (routes, TRUE);
 
 	g_array_sort_with_data (changed_metrics, nm_cmp_uint32_p_with_data, NULL);
 	last_metric = -1;

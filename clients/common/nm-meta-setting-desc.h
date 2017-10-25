@@ -20,6 +20,7 @@
 #ifndef __NM_META_SETTING_DESC_H__
 #define __NM_META_SETTING_DESC_H__
 
+#include "nm-utils/nm-obj.h"
 #include "nm-meta-setting.h"
 
 struct _NMDevice;
@@ -277,14 +278,17 @@ typedef enum {
 
 enum {
 	_NM_META_PROPERTY_TYPE_VPN_SERVICE_TYPE                                 = 0,
-	_NM_META_PROPERTY_TYPE_CONNECTION_TYPE                                  = 4,
+	_NM_META_PROPERTY_TYPE_CONNECTION_TYPE                                  = 3,
 };
 
 #define nm_meta_property_info_connection_type  (nm_meta_setting_infos_editor[NM_META_SETTING_TYPE_CONNECTION].properties[_NM_META_PROPERTY_TYPE_CONNECTION_TYPE])
 #define nm_meta_property_info_vpn_service_type (nm_meta_setting_infos_editor[NM_META_SETTING_TYPE_VPN].properties[_NM_META_PROPERTY_TYPE_VPN_SERVICE_TYPE])
 
 struct _NMMetaPropertyInfo {
-	const NMMetaType *meta_type;
+	union {
+		NMObjBaseInst parent;
+		const NMMetaType *meta_type;
+	};
 
 	const NMMetaSettingInfoEditor *setting_info;
 
@@ -316,7 +320,10 @@ typedef struct _NMMetaSettingValidPartItem {
 } NMMetaSettingValidPartItem;
 
 struct _NMMetaSettingInfoEditor {
-	const NMMetaType *meta_type;
+	union {
+		NMObjBaseInst parent;
+		const NMMetaType *meta_type;
+	};
 	const NMMetaSettingInfo *general;
 	const char *alias;
 	const char *pretty_name;
@@ -341,6 +348,7 @@ struct _NMMetaSettingInfoEditor {
 };
 
 struct _NMMetaType {
+	NMObjBaseClass parent;
 	const char *type_name;
 	const char *(*get_name) (const NMMetaAbstractInfo *abstract_info,
 	                         gboolean for_header);
@@ -364,7 +372,10 @@ struct _NMMetaType {
 };
 
 struct _NMMetaAbstractInfo {
-	const NMMetaType *meta_type;
+	union {
+		NMObjBaseInst parent;
+		const NMMetaType *meta_type;
+	};
 };
 
 extern const NMMetaType nm_meta_type_setting_info_editor;

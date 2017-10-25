@@ -72,6 +72,14 @@ typedef struct {
 	void (*start)                 (NMDeviceFactory *factory);
 
 	/**
+	 * match_connection:
+	 * @connection: the #NMConnection
+	 *
+	 * Check if the factory supports the given connection.
+	 */
+	gboolean (*match_connection)  (NMDeviceFactory *factory, NMConnection *connection);
+
+	/**
 	 * get_connection_parent:
 	 * @factory: the #NMDeviceFactory
 	 * @connection: the #NMConnection to return the parent name for, if supported
@@ -177,10 +185,6 @@ NMDeviceFactory *nm_device_factory_create (GError **error);
 typedef NMDeviceFactory * (*NMDeviceFactoryCreateFunc) (GError **error);
 
 /*****************************************************************************/
-
-void       nm_device_factory_get_supported_types (NMDeviceFactory *factory,
-                                                  const NMLinkType **out_link_types,
-                                                  const char *const**out_setting_types);
 
 const char *nm_device_factory_get_connection_parent (NMDeviceFactory *factory,
                                                      NMConnection *connection);

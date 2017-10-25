@@ -25,6 +25,8 @@
 
 #include <string.h>
 
+#include "nm-utils/c-list-util.h"
+
 #include "nm-utils.h"
 #include "nm-setting-private.h"
 #include "nm-utils.h"
@@ -60,6 +62,7 @@
 #include "nm-setting-wireless-security.h"
 #include "nm-simple-connection.h"
 #include "nm-keyfile-internal.h"
+#include "nm-utils/nm-dedup-multi.h"
 
 #include "test-general-enums.h"
 
@@ -72,6 +75,418 @@
  * will just work correctly. */
 G_STATIC_ASSERT (sizeof (gboolean) == sizeof (int));
 G_STATIC_ASSERT (sizeof (bool) <= sizeof (int));
+
+/*****************************************************************************/
+
+static void
+test_nm_g_slice_free_fcn (void)
+{
+	gpointer p;
+
+	p = g_slice_new (gint64);
+	(nm_g_slice_free_fcn (gint64)) (p);
+
+	p = g_slice_new (gint32);
+	(nm_g_slice_free_fcn (gint32)) (p);
+
+	p = g_slice_new (gint);
+	(nm_g_slice_free_fcn (gint)) (p);
+
+	p = g_slice_new (gint64);
+	nm_g_slice_free_fcn_gint64 (p);
+}
+
+/*****************************************************************************/
+
+typedef struct {
+	int val;
+	int idx;
+	CList lst;
+} CListSort;
+
+static int
+_c_list_sort_cmp (const CList *lst_a, const CList *lst_b, const void *user_data)
+{
+	const CListSort *a, *b;
+
+	g_assert (lst_a);
+	g_assert (lst_b);
+	g_assert (lst_a != lst_b);
+
+	a = c_list_entry (lst_a, CListSort, lst);
+	b = c_list_entry (lst_b, CListSort, lst);
+
+	if (a->val < b->val)
+		return -1;
+	if (a->val > b->val)
+		return 1;
+	return 0;
+}
+
+static void
+test_c_list_sort (void)
+{
+	guint i, n_list, repeat, headless;
+	CList head, *iter, *iter_prev, *lst;
+	CListSort elements[30];
+	const CListSort *el_prev;
+
+	c_list_init (&head);
+	c_list_sort (&head, _c_list_sort_cmp, NULL);
+	g_assert (c_list_length (&head) == 0);
+	g_assert (c_list_is_empty (&head));
+
+	for (repeat = 0; repeat < 10; repeat++) {
+		for (n_list = 1; n_list < G_N_ELEMENTS (elements); n_list++) {
+			for (headless = 0; headless < 2; headless++) {
+				c_list_init (&head);
+				for (i = 0; i < n_list; i++) {
+					CListSort *el;
+
+					el = &elements[i];
+					el->val = nmtst_get_rand_int () % (2*n_list);
+					el->idx = i;
+					c_list_link_tail (&head, &el->lst);
+				}
+
+				if (headless) {
+					lst = head.next;
+					c_list_unlink (&head);
+					lst = c_list_sort_headless (lst, _c_list_sort_cmp, NULL);
+					g_assert (lst);
+					g_assert (lst->next);
+					g_assert (lst->prev);
+					g_assert (c_list_length (lst) == n_list - 1);
+					iter_prev = lst->prev;
+					for (iter = lst; iter != lst; iter = iter->next) {
+						g_assert (iter);
+						g_assert (iter->next);
+						g_assert (iter->prev == iter_prev);
+					}
+					c_list_link_before (lst, &head);
+				} else {
+					c_list_sort (&head, _c_list_sort_cmp, NULL);
+				}
+
+				g_assert (!c_list_is_empty (&head));
+				g_assert (c_list_length (&head) == n_list);
+
+				el_prev = NULL;
+				c_list_for_each (iter, &head) {
+					CListSort *el;
+
+					el = c_list_entry (iter, CListSort, lst);
+					g_assert (el->idx >= 0 && el->idx < n_list);
+					g_assert (el == &elements[el->idx]);
+					if (el_prev) {
+						g_assert (el_prev->val <= el->val);
+						if (el_prev->val == el->val)
+							g_assert (el_prev->idx < el->idx);
+						g_assert (iter->prev == &el_prev->lst);
+						g_assert (el_prev->lst.next == iter);
+					}
+					el_prev = el;
+				}
+				g_assert (head.prev == &el_prev->lst);
+			}
+		}
+	}
+}
+
+/*****************************************************************************/
+
+typedef struct {
+	NMDedupMultiObj parent;
+	guint val;
+	guint other;
+} DedupObj;
+
+static const NMDedupMultiObjClass dedup_obj_class;
+
+static DedupObj *
+_dedup_obj_assert (const NMDedupMultiObj *obj)
+{
+	DedupObj *o;
+
+	g_assert (obj);
+	o = (DedupObj *) obj;
+	g_assert (o->parent.klass == &dedup_obj_class);
+	g_assert (o->parent._ref_count > 0);
+	g_assert (o->val > 0);
+	return o;
+}
+
+static const NMDedupMultiObj *
+_dedup_obj_clone (const NMDedupMultiObj *obj)
+{
+	DedupObj *o, *o2;
+
+	o = _dedup_obj_assert (obj);
+	o2 = g_slice_new0 (DedupObj);
+	o2->parent.klass = &dedup_obj_class;
+	o2->parent._ref_count = 1;
+	o2->val = o->val;
+	o2->other = o->other;
+	return (NMDedupMultiObj *) o2;
+}
+
+static void
+_dedup_obj_destroy (NMDedupMultiObj *obj)
+{
+	DedupObj *o = (DedupObj *) obj;
+
+	nm_assert (o->parent._ref_count == 0);
+	o->parent._ref_count = 1;
+	o = _dedup_obj_assert (obj);
+	g_slice_free (DedupObj, o);
+}
+
+static guint
+_dedup_obj_full_hash (const NMDedupMultiObj *obj)
+{
+	const DedupObj *o;
+
+	o = _dedup_obj_assert (obj);
+	return (o->val * 33) + o->other;
+}
+
+static gboolean
+_dedup_obj_full_equal (const NMDedupMultiObj *obj_a,
+                       const NMDedupMultiObj *obj_b)
+{
+	const DedupObj *o_a = _dedup_obj_assert (obj_a);
+	const DedupObj *o_b = _dedup_obj_assert (obj_b);
+
+	return    o_a->val == o_b->val
+	       && o_a->other == o_b->other;
+}
+
+static const NMDedupMultiObjClass dedup_obj_class = {
+	.obj_clone = _dedup_obj_clone,
+	.obj_destroy = _dedup_obj_destroy,
+	.obj_full_hash = _dedup_obj_full_hash,
+	.obj_full_equal = _dedup_obj_full_equal,
+};
+
+#define DEDUP_OBJ_INIT(val_val, other_other) \
+	(&((DedupObj) { \
+		.parent = { \
+			.klass = &dedup_obj_class, \
+			._ref_count = NM_OBJ_REF_COUNT_STACKINIT, \
+		}, \
+		.val = (val_val), \
+		.other = (other_other), \
+	}))
+
+typedef struct {
+	NMDedupMultiIdxType parent;
+	guint partition_size;
+	guint val_mod;
+} DedupIdxType;
+
+static const NMDedupMultiIdxTypeClass dedup_idx_type_class;
+
+static const DedupIdxType *
+_dedup_idx_assert (const NMDedupMultiIdxType *idx_type)
+{
+	DedupIdxType *t;
+
+	g_assert (idx_type);
+	t = (DedupIdxType *) idx_type;
+	g_assert (t->parent.klass == &dedup_idx_type_class);
+	g_assert (t->partition_size > 0);
+	g_assert (t->val_mod > 0);
+	return t;
+}
+
+static guint
+_dedup_idx_obj_id_hash (const NMDedupMultiIdxType *idx_type,
+                        const NMDedupMultiObj *obj)
+{
+	const DedupIdxType *t;
+	const DedupObj *o;
+	guint h;
+
+	t = _dedup_idx_assert (idx_type);
+	o = _dedup_obj_assert (obj);
+
+	h = o->val / t->partition_size;
+	h = (h * 33) + (o->val % t->val_mod);
+	return h;
+}
+
+static gboolean
+_dedup_idx_obj_id_equal (const NMDedupMultiIdxType *idx_type,
+                         const NMDedupMultiObj *obj_a,
+                         const NMDedupMultiObj *obj_b)
+{
+	const DedupIdxType *t;
+	const DedupObj *o_a;
+	const DedupObj *o_b;
+
+	t = _dedup_idx_assert (idx_type);
+	o_a = _dedup_obj_assert (obj_a);
+	o_b = _dedup_obj_assert (obj_b);
+
+	return    (o_a->val / t->partition_size) == (o_b->val / t->partition_size)
+	       && (o_a->val % t->val_mod) == (o_b->val % t->val_mod);
+}
+
+static guint
+_dedup_idx_obj_partition_hash (const NMDedupMultiIdxType *idx_type,
+                               const NMDedupMultiObj *obj)
+{
+	const DedupIdxType *t;
+	const DedupObj *o;
+
+	t = _dedup_idx_assert (idx_type);
+	o = _dedup_obj_assert (obj);
+
+	return o->val / t->partition_size;
+}
+
+static gboolean
+_dedup_idx_obj_partition_equal (const NMDedupMultiIdxType *idx_type,
+                                const NMDedupMultiObj *obj_a,
+                                const NMDedupMultiObj *obj_b)
+{
+	const DedupIdxType *t;
+	const DedupObj *o_a;
+	const DedupObj *o_b;
+
+	t = _dedup_idx_assert (idx_type);
+	o_a = _dedup_obj_assert (obj_a);
+	o_b = _dedup_obj_assert (obj_b);
+
+	return (o_a->val / t->partition_size) == (o_b->val / t->partition_size);
+}
+
+static const NMDedupMultiIdxTypeClass dedup_idx_type_class = {
+	.idx_obj_id_hash = _dedup_idx_obj_id_hash,
+	.idx_obj_id_equal = _dedup_idx_obj_id_equal,
+	.idx_obj_partition_hash = _dedup_idx_obj_partition_hash,
+	.idx_obj_partition_equal = _dedup_idx_obj_partition_equal,
+};
+
+static const DedupIdxType *
+DEDUP_IDX_TYPE_INIT (DedupIdxType *idx_type, guint partition_size, guint val_mod)
+{
+	nm_dedup_multi_idx_type_init ((NMDedupMultiIdxType *) idx_type, &dedup_idx_type_class);
+	idx_type->val_mod = val_mod;
+	idx_type->partition_size = partition_size;
+	return idx_type;
+}
+
+static gboolean
+_dedup_idx_add (NMDedupMultiIndex *idx, const DedupIdxType *idx_type, const DedupObj *obj, NMDedupMultiIdxMode mode, const NMDedupMultiEntry **out_entry)
+{
+	g_assert (idx);
+	_dedup_idx_assert ((NMDedupMultiIdxType *) idx_type);
+	if (obj)
+		_dedup_obj_assert ((NMDedupMultiObj *) obj);
+	return nm_dedup_multi_index_add (idx, (NMDedupMultiIdxType *) idx_type,
+	                                 obj, mode, out_entry, NULL);
+}
+
+static void
+_dedup_head_entry_assert (const NMDedupMultiHeadEntry *entry)
+{
+	g_assert (entry);
+	g_assert (entry->len > 0);
+	g_assert (entry->len == c_list_length (&entry->lst_entries_head));
+	g_assert (entry->idx_type);
+	g_assert (entry->is_head);
+}
+
+static const DedupObj *
+_dedup_entry_assert (const NMDedupMultiEntry *entry)
+{
+	g_assert (entry);
+	g_assert (!c_list_is_empty (&entry->lst_entries));
+	g_assert (entry->head);
+	g_assert (!entry->is_head);
+	g_assert (entry->head != (gpointer) entry);
+	_dedup_head_entry_assert (entry->head);
+	return _dedup_obj_assert (entry->obj);
+}
+
+static const DedupIdxType *
+_dedup_entry_get_idx_type (const NMDedupMultiEntry *entry)
+{
+	_dedup_entry_assert (entry);
+
+	g_assert (entry->head);
+	g_assert (entry->head->idx_type);
+	return _dedup_idx_assert (entry->head->idx_type);
+}
+
+static void
+_dedup_entry_assert_all (const NMDedupMultiEntry *entry, gssize expected_idx, const DedupObj *const*expected_obj)
+{
+	gsize n, i;
+	CList *iter;
+
+	g_assert (entry);
+	_dedup_entry_assert (entry);
+
+	g_assert (expected_obj);
+	n = NM_PTRARRAY_LEN (expected_obj);
+
+	g_assert (n == c_list_length (&entry->lst_entries));
+
+	g_assert (expected_idx >= -1 && expected_idx < n);
+	g_assert (entry->head);
+	if (expected_idx == -1)
+		g_assert (entry->head == (gpointer) entry);
+	else
+		g_assert (entry->head != (gpointer) entry);
+
+	i = 0;
+	c_list_for_each (iter, &entry->head->lst_entries_head) {
+		const NMDedupMultiEntry *entry_current = c_list_entry (iter, NMDedupMultiEntry, lst_entries);
+		const DedupObj *obj_current;
+		const DedupIdxType *idx_type = _dedup_entry_get_idx_type (entry_current);
+
+		obj_current = _dedup_entry_assert (entry_current);
+		g_assert (obj_current);
+		g_assert (i < n);
+		if (expected_idx == i)
+			g_assert (entry_current == entry);
+		g_assert (idx_type->parent.klass->idx_obj_partition_equal (&idx_type->parent,
+		                                                           entry_current->obj,
+		                                                           c_list_entry (entry->head->lst_entries_head.next, NMDedupMultiEntry, lst_entries)->obj));
+		i++;
+	}
+}
+#define _dedup_entry_assert_all(entry, expected_idx, ...) _dedup_entry_assert_all (entry, expected_idx, (const DedupObj *const[]) { __VA_ARGS__, NULL })
+
+static void
+test_dedup_multi (void)
+{
+	NMDedupMultiIndex *idx;
+	DedupIdxType IDX_20_3_a_stack;
+	const DedupIdxType *const IDX_20_3_a = DEDUP_IDX_TYPE_INIT (&IDX_20_3_a_stack, 20, 3);
+	const NMDedupMultiEntry *entry1;
+
+	idx = nm_dedup_multi_index_new ();
+
+	g_assert (_dedup_idx_add (idx, IDX_20_3_a, DEDUP_OBJ_INIT (1, 1), NM_DEDUP_MULTI_IDX_MODE_APPEND, &entry1));
+	_dedup_entry_assert_all (entry1, 0, DEDUP_OBJ_INIT (1, 1));
+
+	g_assert (nm_dedup_multi_index_obj_find (idx, (NMDedupMultiObj *) DEDUP_OBJ_INIT (1, 1)));
+	g_assert (!nm_dedup_multi_index_obj_find (idx, (NMDedupMultiObj *) DEDUP_OBJ_INIT (1, 2)));
+
+	g_assert (_dedup_idx_add (idx, IDX_20_3_a, DEDUP_OBJ_INIT (1, 2), NM_DEDUP_MULTI_IDX_MODE_APPEND, &entry1));
+	_dedup_entry_assert_all (entry1, 0, DEDUP_OBJ_INIT (1, 2));
+
+	g_assert (!nm_dedup_multi_index_obj_find (idx, (NMDedupMultiObj *) DEDUP_OBJ_INIT (1, 1)));
+	g_assert (nm_dedup_multi_index_obj_find (idx, (NMDedupMultiObj *) DEDUP_OBJ_INIT (1, 2)));
+
+	g_assert (_dedup_idx_add (idx, IDX_20_3_a, DEDUP_OBJ_INIT (2, 2), NM_DEDUP_MULTI_IDX_MODE_APPEND, &entry1));
+	_dedup_entry_assert_all (entry1, 1, DEDUP_OBJ_INIT (1, 2), DEDUP_OBJ_INIT (2, 2));
+
+	nm_dedup_multi_index_unref (idx);
+}
 
 /*****************************************************************************/
 
@@ -3492,7 +3907,7 @@ _test_connection_normalize_type_normalizable_setting (const char *type,
 
 	base_type = nm_setting_lookup_type (type);
 	g_assert (base_type != G_TYPE_INVALID);
-	g_assert (_nm_setting_type_get_base_type_priority (base_type));
+	g_assert (_nm_setting_type_get_base_type_priority (base_type) != NM_SETTING_PRIORITY_INVALID);
 
 	con = nmtst_create_minimal_connection (id, NULL, NULL, &s_con);
 
@@ -3522,7 +3937,7 @@ _test_connection_normalize_type_unnormalizable_setting (const char *type)
 
 	base_type = nm_setting_lookup_type (type);
 	g_assert (base_type != G_TYPE_INVALID);
-	g_assert (_nm_setting_type_get_base_type_priority (base_type));
+	g_assert (_nm_setting_type_get_base_type_priority (base_type) != NM_SETTING_PRIORITY_INVALID);
 
 	con = nmtst_create_minimal_connection (id, NULL, NULL, &s_con);
 
@@ -3545,7 +3960,7 @@ _test_connection_normalize_type_normalizable_type (const char *type,
 
 	base_type = nm_setting_lookup_type (type);
 	g_assert (base_type != G_TYPE_INVALID);
-	g_assert (_nm_setting_type_get_base_type_priority (base_type));
+	g_assert (_nm_setting_type_get_base_type_priority (base_type) != NM_SETTING_PRIORITY_INVALID);
 
 	con = nmtst_create_minimal_connection (id, NULL, NULL, &s_con);
 
@@ -5782,7 +6197,9 @@ int main (int argc, char **argv)
 {
 	nmtst_init (&argc, &argv, TRUE);
 
-	/* The tests */
+	g_test_add_func ("/core/general/test_nm_g_slice_free_fcn", test_nm_g_slice_free_fcn);
+	g_test_add_func ("/core/general/test_c_list_sort", test_c_list_sort);
+	g_test_add_func ("/core/general/test_dedup_multi", test_dedup_multi);
 	g_test_add_func ("/core/general/test_utils_str_utf8safe", test_utils_str_utf8safe);
 	g_test_add_func ("/core/general/test_nm_in_set", test_nm_in_set);
 	g_test_add_func ("/core/general/test_nm_in_strset", test_nm_in_strset);

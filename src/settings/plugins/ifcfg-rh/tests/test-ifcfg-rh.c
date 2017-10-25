@@ -4108,7 +4108,6 @@ test_write_wired_static (void)
 
 	route6 = nm_ip_route_new (AF_INET6, "::", 128, "2222:aaaa::9999", 1, &error);
 	g_assert_no_error (error);
-	nm_ip_route_set_attribute (route6, NM_IP_ROUTE_ATTRIBUTE_TOS, g_variant_new_byte (0xb8));
 	nm_ip_route_set_attribute (route6, NM_IP_ROUTE_ATTRIBUTE_CWND, g_variant_new_uint32 (100));
 	nm_ip_route_set_attribute (route6, NM_IP_ROUTE_ATTRIBUTE_MTU, g_variant_new_uint32 (1280));
 	nm_ip_route_set_attribute (route6, NM_IP_ROUTE_ATTRIBUTE_LOCK_CWND, g_variant_new_boolean (TRUE));
@@ -4969,15 +4968,16 @@ test_write_wired_aliases (void)
 			if (!g_strcmp0 (addrstr, ip[j]))
 				break;
 		}
-		g_assert (j < num_addresses);
-
-		g_assert_cmpint (nm_ip_address_get_prefix (addr), ==, 24);
-		if (label[j])
-			g_assert_cmpstr (g_variant_get_string (nm_ip_address_get_attribute (addr, "label"), NULL), ==, label[j]);
-		else
-			g_assert (nm_ip_address_get_attribute (addr, "label") == NULL);
-
-		ip[j] = NULL;
+		if (j >= num_addresses)
+			g_assert_not_reached ();
+		else {
+			g_assert_cmpint (nm_ip_address_get_prefix (addr), ==, 24);
+			if (label[j])
+				g_assert_cmpstr (g_variant_get_string (nm_ip_address_get_attribute (addr, "label"), NULL), ==, label[j]);
+			else
+				g_assert (nm_ip_address_get_attribute (addr, "label") == NULL);
+			ip[j] = NULL;
+		}
 	}
 
 	for (i = 0; i < num_addresses; i++)
@@ -7172,6 +7172,7 @@ test_read_bridge_main (void)
 	g_assert_cmpuint (nm_setting_bridge_get_hello_time (s_bridge), ==, 7);
 	g_assert_cmpuint (nm_setting_bridge_get_max_age (s_bridge), ==, 39);
 	g_assert_cmpuint (nm_setting_bridge_get_ageing_time (s_bridge), ==, 235352);
+	g_assert_cmpuint (nm_setting_bridge_get_group_forward_mask (s_bridge), ==, 24);
 	g_assert (!nm_setting_bridge_get_multicast_snooping (s_bridge));
 
 	/* MAC address */
@@ -7217,6 +7218,7 @@ test_write_bridge_main (void)
 
 	g_object_set (s_bridge,
 	              NM_SETTING_BRIDGE_MAC_ADDRESS, mac,
+	              NM_SETTING_BRIDGE_GROUP_FORWARD_MASK, 19008,
 	              NULL);
 
 	/* IP4 setting */

@@ -45,6 +45,8 @@
 #define NM_MANAGER_WIMAX_HARDWARE_ENABLED "wimax-hardware-enabled"
 #define NM_MANAGER_ACTIVE_CONNECTIONS "active-connections"
 #define NM_MANAGER_CONNECTIVITY "connectivity"
+#define NM_MANAGER_CONNECTIVITY_CHECK_AVAILABLE "connectivity-check-available"
+#define NM_MANAGER_CONNECTIVITY_CHECK_ENABLED "connectivity-check-enabled"
 #define NM_MANAGER_PRIMARY_CONNECTION "primary-connection"
 #define NM_MANAGER_PRIMARY_CONNECTION_TYPE "primary-connection-type"
 #define NM_MANAGER_ACTIVATING_CONNECTION "activating-connection"
@@ -123,5 +125,7 @@ gboolean            nm_manager_deactivate_connection   (NMManager *manager,
                                                         GError **error);
 
 void                nm_manager_set_capability   (NMManager *self, NMCapability cap);
+
+gboolean            nm_manager_remove_device (NMManager *self, const char *ifname);
 
 #endif /* __NETWORKMANAGER_MANAGER_H__ */

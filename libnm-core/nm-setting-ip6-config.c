@@ -52,7 +52,7 @@
  **/
 
 G_DEFINE_TYPE_WITH_CODE (NMSettingIP6Config, nm_setting_ip6_config, NM_TYPE_SETTING_IP_CONFIG,
-                         _nm_register_setting (IP6_CONFIG, 5))
+                         _nm_register_setting (IP6_CONFIG, NM_SETTING_PRIORITY_IP))
 NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_IP6_CONFIG)
 
 #define NM_SETTING_IP6_CONFIG_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_IP6_CONFIG, NMSettingIP6ConfigPrivate))
@@ -711,7 +711,7 @@ nm_setting_ip6_config_class_init (NMSettingIP6ConfigClass *ip6_class)
 	 * or "stable-privacy".
 	 *
 	 * If the property is set to "eui64", the addresses will be generated
-	 * using the interface tokens derived from  hardware address. This makes
+	 * using the interface tokens derived from hardware address. This makes
 	 * the host part of the address to stay constant, making it possible
 	 * to track host's presence when it changes networks. The address changes
 	 * when the interface hardware is replaced.

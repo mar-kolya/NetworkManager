@@ -190,6 +190,19 @@ nm_utils_exp10 (gint16 ex)
 
 /*****************************************************************************/
 
+guint
+nm_utils_in6_addr_hash (const struct in6_addr *addr)
+{
+	guint hash = (guint) 0x897da53981a13ULL;
+	int i;
+
+	for (i = 0; i < sizeof (*addr); i++)
+		hash = NM_HASH_COMBINE (hash, ((const guint8 *) addr)[i]);
+	return hash;
+}
+
+/*****************************************************************************/
+
 /*
  * nm_ethernet_address_is_valid:
  * @addr: pointer to a binary or ASCII Ethernet address
@@ -274,14 +287,16 @@ nm_utils_ip4_address_clear_host_address (in_addr_t addr, guint8 plen)
  * @plen: prefix length of network
  *
  * Note: this function is self assignment safe, to update @src inplace, set both
- * @dst and @src to the same destination.
+ * @dst and @src to the same destination or set @src NULL.
  */
 const struct in6_addr *
 nm_utils_ip6_address_clear_host_address (struct in6_addr *dst, const struct in6_addr *src, guint8 plen)
 {
 	g_return_val_if_fail (plen <= 128, NULL);
-	g_return_val_if_fail (src, NULL);
 	g_return_val_if_fail (dst, NULL);
+
+	if (!src)
+		src = dst;
 
 	if (plen < 128) {
 		guint nbytes = plen / 8;
@@ -301,28 +316,28 @@ nm_utils_ip6_address_clear_host_address (struct in6_addr *dst, const struct in6_
 	return dst;
 }
 
-gboolean
-nm_utils_ip6_address_same_prefix (const struct in6_addr *addr_a, const struct in6_addr *addr_b, guint8 plen)
+int
+nm_utils_ip6_address_same_prefix_cmp (const struct in6_addr *addr_a, const struct in6_addr *addr_b, guint8 plen)
 {
 	int nbytes;
-	guint8 t, m;
+	guint8 va, vb, m;
 
 	if (plen >= 128)
-		return memcmp (addr_a, addr_b, sizeof (struct in6_addr)) == 0;
+		NM_CMP_DIRECT_MEMCMP (addr_a, addr_b, sizeof (struct in6_addr));
+	else {
+		nbytes = plen / 8;
+		if (nbytes)
+			NM_CMP_DIRECT_MEMCMP (addr_a, addr_b, nbytes);
 
-	nbytes = plen / 8;
-	if (nbytes) {
-		if (memcmp (addr_a, addr_b, nbytes) != 0)
-			return FALSE;
+		plen = plen % 8;
+		if (plen != 0) {
+			m = ~((1 << (8 - plen)) - 1);
+			va = ((((const guint8 *) addr_a))[nbytes]) & m;
+			vb = ((((const guint8 *) addr_b))[nbytes]) & m;
+			NM_CMP_DIRECT (va, vb);
+		}
 	}
-
-	plen = plen % 8;
-	if (plen == 0)
-		return TRUE;
-
-	m = ~((1 << (8 - plen)) - 1);
-	t = ((((const guint8 *) addr_a))[nbytes]) ^ ((((const guint8 *) addr_b))[nbytes]);
-	return (t & m) == 0;
+	return 0;
 }
 
 /*****************************************************************************/
@@ -2131,7 +2146,7 @@ monotonic_timestamp_get (struct timespec *tp)
 		break;
 	case 2:
 		/* fallback, return CLOCK_MONOTONIC. Kernels prior to 2.6.39
-		 * don't support CLOCK_BOOTTIME. */
+		 * (released on 18 May, 2011) don't support CLOCK_BOOTTIME. */
 		err = clock_gettime (CLOCK_MONOTONIC, tp);
 		break;
 	}
@@ -2292,7 +2307,7 @@ _log_connection_sort_hashes_fcn (gconstpointer a, gconstpointer b)
 {
 	const LogConnectionSettingData *v1 = a;
 	const LogConnectionSettingData *v2 = b;
-	guint32 p1, p2;
+	NMSettingPriority p1, p2;
 	NMSetting *s1, *s2;
 
 	s1 = v1->setting ? v1->setting : v1->diff_base_setting;
@@ -2432,12 +2447,26 @@ nm_utils_log_connection_diff (NMConnection *connection, NMConnection *diff_base,
 	if (!name)
 		name = "";
 
-	connection_diff_are_same = nm_connection_diff (connection, diff_base, NM_SETTING_COMPARE_FLAG_EXACT | NM_SETTING_COMPARE_FLAG_DIFF_RESULT_NO_DEFAULT, &connection_diff);
+	connection_diff_are_same = nm_connection_diff (connection, diff_base,
+	                                               NM_SETTING_COMPARE_FLAG_EXACT | NM_SETTING_COMPARE_FLAG_DIFF_RESULT_NO_DEFAULT,
+	                                               &connection_diff);
 	if (connection_diff_are_same) {
-		if (diff_base)
-			nm_log (level, domain, NULL, NULL, "%sconnection '%s' (%p/%s and %p/%s): no difference", prefix, name, connection, G_OBJECT_TYPE_NAME (connection), diff_base, G_OBJECT_TYPE_NAME (diff_base));
-		else
-			nm_log (level, domain, NULL, NULL, "%sconnection '%s' (%p/%s): no properties set", prefix, name, connection, G_OBJECT_TYPE_NAME (connection));
+		const char *t1, *t2;
+
+		t1 = nm_connection_get_connection_type (connection);
+		if (diff_base) {
+			t2 = nm_connection_get_connection_type (diff_base);
+			nm_log (level, domain, NULL, NULL,
+			        "%sconnection '%s' (%p/%s/%s%s%s and %p/%s/%s%s%s): no difference",
+			        prefix, name,
+			        connection, G_OBJECT_TYPE_NAME (connection), NM_PRINT_FMT_QUOTE_STRING (t1),
+			        diff_base, G_OBJECT_TYPE_NAME (diff_base), NM_PRINT_FMT_QUOTE_STRING (t2));
+		} else {
+			nm_log (level, domain, NULL, NULL,
+			        "%sconnection '%s' (%p/%s/%s%s%s): no properties set",
+			        prefix, name,
+			        connection, G_OBJECT_TYPE_NAME (connection), NM_PRINT_FMT_QUOTE_STRING (t1));
+		}
 		g_assert (!connection_diff);
 		return;
 	}
@@ -2471,12 +2500,20 @@ nm_utils_log_connection_diff (NMConnection *connection, NMConnection *diff_base,
 			if (print_header) {
 				GError *err_verify = NULL;
 				const char *path = nm_connection_get_path (connection);
+				const char *t1, *t2;
 
+				t1 = nm_connection_get_connection_type (connection);
 				if (diff_base) {
-					nm_log (level, domain, NULL, NULL, "%sconnection '%s' (%p/%s < %p/%s)%s%s%s:", prefix, name, connection, G_OBJECT_TYPE_NAME (connection), diff_base, G_OBJECT_TYPE_NAME (diff_base),
+					t2 = nm_connection_get_connection_type (diff_base);
+					nm_log (level, domain, NULL, NULL, "%sconnection '%s' (%p/%s/%s%s%s < %p/%s/%s%s%s)%s%s%s:",
+					        prefix, name,
+					        connection, G_OBJECT_TYPE_NAME (connection), NM_PRINT_FMT_QUOTE_STRING (t1),
+					        diff_base, G_OBJECT_TYPE_NAME (diff_base), NM_PRINT_FMT_QUOTE_STRING (t2),
 					        NM_PRINT_FMT_QUOTED (path, " [", path, "]", ""));
 				} else {
-					nm_log (level, domain, NULL, NULL, "%sconnection '%s' (%p/%s):%s%s%s", prefix, name, connection, G_OBJECT_TYPE_NAME (connection),
+					nm_log (level, domain, NULL, NULL, "%sconnection '%s' (%p/%s/%s%s%s):%s%s%s",
+					        prefix, name,
+					        connection, G_OBJECT_TYPE_NAME (connection), NM_PRINT_FMT_QUOTE_STRING (t1),
 					        NM_PRINT_FMT_QUOTED (path, " [", path, "]", ""));
 				}
 				print_header = FALSE;
@@ -3437,7 +3474,7 @@ nm_utils_stable_id_parse (const char *stable_id,
 	g_return_val_if_fail (out_generated, NM_UTILS_STABLE_TYPE_RANDOM);
 
 	if (!stable_id) {
-		out_generated = NULL;
+		*out_generated = NULL;
 		return NM_UTILS_STABLE_TYPE_UUID;
 	}
 

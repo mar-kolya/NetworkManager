@@ -2291,7 +2291,7 @@ activate_connection_cb (GObject *client, GAsyncResult *result, gpointer user_dat
 		activate_connection_info_finish (info);
 	} else {
 		state = nm_active_connection_get_state (active);
-		if (!device) {
+		if (!device && !nm_active_connection_get_vpn (active)) {
 			/* device could be NULL for virtual devices. Fill it here. */
 			ac_devs = nm_active_connection_get_devices (active);
 			device = ac_devs->len > 0 ? g_ptr_array_index (ac_devs, 0) : NULL;
@@ -4431,6 +4431,8 @@ add_connection_cb (GObject *client,
 	NmCli *nmc = info->nmc;
 	NMRemoteConnection *connection;
 	GError *error = NULL;
+	const GPtrArray *connections;
+	guint i, found;
 
 	connection = nm_client_add_connection_finish (NM_CLIENT (client), result, &error);
 	if (error) {
@@ -4440,6 +4442,28 @@ add_connection_cb (GObject *client,
 		g_error_free (error);
 		nmc->return_value = NMC_RESULT_ERROR_CON_ACTIVATION;
 	} else {
+		connections = nm_client_get_connections (nmc->client);
+		if (connections) {
+			found = 0;
+			for (i = 0; i < connections->len; i++) {
+				NMConnection *candidate = NM_CONNECTION (connections->pdata[i]);
+
+				if ((NMConnection *) connection == candidate)
+					continue;
+				if (nm_streq0 (nm_connection_get_id (candidate), info->con_name))
+					found++;
+			}
+			if (found > 0) {
+				g_printerr (g_dngettext (GETTEXT_PACKAGE,
+				                         "Warning: There is another connection with the name '%1$s'. Reference the connection by its uuid '%2$s'\n",
+				                         "Warning: There are %3$u other connections with the name '%1$s'. Reference the connection by its uuid '%2$s'\n",
+				                         found),
+				            info->con_name,
+				            nm_connection_get_uuid (NM_CONNECTION (connection)),
+				            found);
+			}
+		}
+
 		g_print (_("Connection '%s' (%s) successfully added.\n"),
 		         nm_connection_get_id (NM_CONNECTION (connection)),
 		         nm_connection_get_uuid (NM_CONNECTION (connection)));
@@ -4595,44 +4619,78 @@ again:
 		goto again;
 }
 
+static NMMetaSettingType
+connection_get_base_meta_setting_type (NMConnection *connection)
+{
+	const char *connection_type;
+	NMSetting *base_setting;
+	const NMMetaSettingInfoEditor *editor;
+
+	connection_type = nm_connection_get_connection_type (connection);
+	nm_assert (connection_type);
+	base_setting = nm_connection_get_setting_by_name (connection, connection_type);
+	nm_assert (base_setting);
+	editor = nm_meta_setting_info_editor_find_by_setting (base_setting);
+	nm_assert (editor);
+
+	return editor - nm_meta_setting_infos_editor;
+}
+
+static void
+questionnaire_mandatory_ask_setting (NmCli *nmc, NMConnection *connection, NMMetaSettingType type)
+{
+	const NMMetaSettingInfoEditor *editor;
+	const NMMetaPropertyInfo *property_info;
+	guint p;
+
+	editor = &nm_meta_setting_infos_editor[type];
+	if (!editor->properties)
+		return;
+
+	for (p = 0; editor->properties[p]; p++) {
+		property_info = editor->properties[p];
+
+		if (_meta_property_needs_bond_hack (property_info)) {
+			guint i;
+
+			for (i = 0; i < nm_meta_property_typ_data_bond.nested_len; i++) {
+				const NMMetaNestedPropertyInfo *bi = &nm_meta_property_typ_data_bond.nested[i];
+
+				if (!option_relevant (connection, (const NMMetaAbstractInfo *) bi))
+					continue;
+				if (   (bi->base.inf_flags & NM_META_PROPERTY_INF_FLAG_REQD)
+				    || (_dynamic_options_get ((const NMMetaAbstractInfo *) bi) & PROPERTY_INF_FLAG_ENABLED))
+					ask_option (nmc, connection, (const NMMetaAbstractInfo *) bi);
+			}
+		} else {
+			if (!property_info->is_cli_option)
+				continue;
+
+			if (!option_relevant (connection, (const NMMetaAbstractInfo *) property_info))
+				continue;
+			if (   (property_info->inf_flags & NM_META_PROPERTY_INF_FLAG_REQD)
+			    || (_dynamic_options_get ((const NMMetaAbstractInfo *) property_info) & PROPERTY_INF_FLAG_ENABLED))
+				ask_option (nmc, connection, (const NMMetaAbstractInfo *) property_info);
+		}
+	}
+}
+
 static void
 questionnaire_mandatory (NmCli *nmc, NMConnection *connection)
 {
-	NMMetaSettingType s;
+	NMMetaSettingType s, base;
 
+	/* First ask connection properties */
+	questionnaire_mandatory_ask_setting (nmc, connection, NM_META_SETTING_TYPE_CONNECTION);
+
+	/* Ask properties of the base setting */
+	base = connection_get_base_meta_setting_type (connection);
+	questionnaire_mandatory_ask_setting (nmc, connection, base);
+
+	/* Remaining settings */
 	for (s = 0; s < _NM_META_SETTING_TYPE_NUM; s++) {
-		const NMMetaPropertyInfo *const*property_infos;
-		guint p;
-
-		property_infos = nm_meta_setting_infos_editor[s].properties;
-		if (!property_infos)
-			continue;
-		for (p = 0; property_infos[p]; p++) {
-			const NMMetaPropertyInfo *property_info = property_infos[p];
-
-			if (_meta_property_needs_bond_hack (property_info)) {
-				guint i;
-
-				for (i = 0; i < nm_meta_property_typ_data_bond.nested_len; i++) {
-					const NMMetaNestedPropertyInfo *bi = &nm_meta_property_typ_data_bond.nested[i];
-
-					if (!option_relevant (connection, (const NMMetaAbstractInfo *) bi))
-						continue;
-					if (   (bi->base.inf_flags & NM_META_PROPERTY_INF_FLAG_REQD)
-					    || (_dynamic_options_get ((const NMMetaAbstractInfo *) bi) & PROPERTY_INF_FLAG_ENABLED))
-						ask_option (nmc, connection, (const NMMetaAbstractInfo *) bi);
-				}
-			} else {
-				if (!property_info->is_cli_option)
-					continue;
-
-				if (!option_relevant (connection, (const NMMetaAbstractInfo *) property_info))
-					continue;
-				if (   (property_info->inf_flags & NM_META_PROPERTY_INF_FLAG_REQD)
-				    || (_dynamic_options_get ((const NMMetaAbstractInfo *) property_info) & PROPERTY_INF_FLAG_ENABLED))
-					ask_option (nmc, connection, (const NMMetaAbstractInfo *) property_info);
-			}
-		}
+		if (!NM_IN_SET (s, NM_META_SETTING_TYPE_CONNECTION, base))
+			questionnaire_mandatory_ask_setting (nmc, connection, s);
 	}
 }
 
@@ -4659,33 +4717,44 @@ want_provide_opt_args (const char *type, int num)
 static gboolean
 questionnaire_one_optional (NmCli *nmc, NMConnection *connection)
 {
-	NMMetaSettingType s;
+	NMMetaSettingType base;
 	gs_unref_ptrarray GPtrArray *infos = NULL;
-	guint i;
+	guint i, j;
 	gboolean already_confirmed = FALSE;
 	NMMetaSettingType s_asking = NM_META_SETTING_TYPE_UNKNOWN;
+	NMMetaSettingType settings[_NM_META_SETTING_TYPE_NUM];
+
+	base = connection_get_base_meta_setting_type (connection);
+
+	i = 0;
+	settings[i++] = NM_META_SETTING_TYPE_CONNECTION;
+	settings[i++] = base;
+	for (j = 0; j < _NM_META_SETTING_TYPE_NUM; j++) {
+		if (!NM_IN_SET (j, NM_META_SETTING_TYPE_CONNECTION, base))
+			settings[i++] = j;
+	}
 
 	infos = g_ptr_array_new ();
 
 	/* Find first setting with relevant options and count them. */
 again:
-	for (s = 0; s < _NM_META_SETTING_TYPE_NUM; s++) {
+	for (i = 0; i < _NM_META_SETTING_TYPE_NUM; i++) {
 		const NMMetaPropertyInfo *const*property_infos;
 		guint p;
 
 		if (   s_asking != NM_META_SETTING_TYPE_UNKNOWN
-		    && s != s_asking)
+		    && settings[i] != s_asking)
 			continue;
 
-		property_infos = nm_meta_setting_infos_editor[s].properties;
+		property_infos = nm_meta_setting_infos_editor[settings[i]].properties;
 		if (!property_infos)
 			continue;
 		for (p = 0; property_infos[p]; p++) {
 			const NMMetaPropertyInfo *property_info = property_infos[p];
 
 			if (_meta_property_needs_bond_hack (property_info)) {
-				for (i = 0; i < nm_meta_property_typ_data_bond.nested_len; i++) {
-					const NMMetaNestedPropertyInfo *bi = &nm_meta_property_typ_data_bond.nested[i];
+				for (j = 0; j < nm_meta_property_typ_data_bond.nested_len; j++) {
+					const NMMetaNestedPropertyInfo *bi = &nm_meta_property_typ_data_bond.nested[j];
 
 					if (!option_relevant (connection, (const NMMetaAbstractInfo *) bi))
 						continue;
@@ -4700,7 +4769,7 @@ again:
 			}
 		}
 		if (infos->len) {
-			s_asking = s;
+			s_asking = settings[i];
 			break;
 		}
 	}
@@ -5156,9 +5225,13 @@ gen_property_names (const char *text, int state)
 		                                 valid_settings_main,
 		                                 valid_settings_slave,
 		                                 NULL);
-		setting = nm_meta_setting_info_editor_new_setting (nm_meta_setting_info_editor_find_by_name (setting_name, FALSE),
-		                                                   NM_META_ACCESSOR_SETTING_INIT_TYPE_DEFAULT);
-	} else {
+		if (setting_name) {
+			setting = nm_meta_setting_info_editor_new_setting (nm_meta_setting_info_editor_find_by_name (setting_name, FALSE),
+			                                                   NM_META_ACCESSOR_SETTING_INIT_TYPE_DEFAULT);
+		}
+	}
+
+	if (!setting) {
 		/* Else take the current setting, if any */
 		setting = nmc_tab_completion.setting ? g_object_ref (nmc_tab_completion.setting) : NULL;
 	}

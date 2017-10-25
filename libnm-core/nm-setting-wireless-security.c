@@ -54,7 +54,7 @@
  **/
 
 G_DEFINE_TYPE_WITH_CODE (NMSettingWirelessSecurity, nm_setting_wireless_security, NM_TYPE_SETTING,
-                         _nm_register_setting (WIRELESS_SECURITY, 3))
+                         _nm_register_setting (WIRELESS_SECURITY, NM_SETTING_PRIORITY_HW_AUX))
 NM_SETTING_REGISTER_TYPE (NM_TYPE_SETTING_WIRELESS_SECURITY)
 
 #define NM_SETTING_WIRELESS_SECURITY_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_WIRELESS_SECURITY, NMSettingWirelessSecurityPrivate))
@@ -1843,7 +1843,7 @@ nm_setting_wireless_security_class_init (NMSettingWirelessSecurityClass *setting
 	 * automatically determine whether it's feasible to start WPS enrollment from
 	 * the Access Point capabilities.
 	 *
-	 * WPS can by disabled by setting this property to a value of 1.
+	 * WPS can be disabled by setting this property to a value of 1.
 	 *
 	 * Since: 1.10
 	 **/

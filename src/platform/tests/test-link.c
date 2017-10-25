@@ -264,7 +264,8 @@ test_slave (int master, int type, SignalData *master_changed)
 	}
 	g_assert (!nm_platform_link_is_up (NM_PLATFORM_GET, ifindex));
 	g_assert (!nm_platform_link_is_connected (NM_PLATFORM_GET, ifindex));
-	if (nm_platform_link_is_connected (NM_PLATFORM_GET, master)) {
+	if (   nmtstp_is_root_test ()
+	    && nm_platform_link_is_connected (NM_PLATFORM_GET, master)) {
 		if (nm_platform_link_get_type (NM_PLATFORM_GET, master) == NM_LINK_TYPE_TEAM) {
 			/* Older team versions (e.g. Fedora 17) have a bug that team master stays
 			 * IFF_LOWER_UP even if its slave is down. Double check it with iproute2 and if
@@ -285,7 +286,7 @@ test_slave (int master, int type, SignalData *master_changed)
 	g_assert (nm_platform_link_is_connected (NM_PLATFORM_GET, master));
 	accept_signals (link_changed, 1, 3);
 	/* NM running, can cause additional change of addrgenmode */
-	accept_signals (master_changed, 1, 2);
+	accept_signals (master_changed, 0, 2);
 
 	/* Enslave again
 	 *
@@ -327,7 +328,7 @@ test_slave (int master, int type, SignalData *master_changed)
 		ensure_no_signal (link_changed);
 		accept_signal (link_removed);
 	}
-	accept_signals (master_changed, 1, 2);
+	accept_signals (master_changed, 0, 2);
 
 	ensure_no_signal (master_changed);
 
@@ -790,7 +791,7 @@ test_software_detect (gconstpointer user_data)
 		 * namespaced, the creation can fail if a macvtap in another namespace
 		 * has the same index. Try to detect this situation and skip already
 		 * used indexes.
-		 * http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=17af2bce88d31e65ed73d638bb752d2e13c66ced
+		 * The fix (17af2bce) is included kernel 4.7, dated 24 July, 2016.
 		 */
 		for (i = ifindex_parent + 1; i < ifindex_parent + 100; i++) {
 			snprintf (buf, sizeof (buf), "/sys/class/macvtap/tap%d", i);
@@ -1727,8 +1728,8 @@ test_nl_bugs_veth (void)
 	pllink_veth0 = nm_platform_link_get (NM_PLATFORM_GET, ifindex_veth0);
 	g_assert (pllink_veth0);
 	if (pllink_veth0->parent == 0) {
-		/* pre-4.1 kernels don't support exposing the veth peer as IFA_LINK. skip the remainder
-		 * of the test. */
+		/* Kernels prior to 4.1 dated 21 June, 2015 don't support exposing the veth peer
+		 * as IFA_LINK. skip the remainder of the test. */
 		goto out;
 	}
 	g_assert_cmpint (pllink_veth0->parent, ==, ifindex_veth1);
@@ -2022,8 +2023,8 @@ test_netns_general (gpointer fixture, gconstpointer test_data)
 	_sysctl_assert_eq (platform_1, "/proc/sys/net/ipv6/conf/dummy2b/disable_ipv6", NULL);
 	_sysctl_assert_eq (platform_2, "/proc/sys/net/ipv6/conf/dummy2a/disable_ipv6", NULL);
 
-	/* older kernels (Ubuntu 12.04) don't support ethtool -i for dummy devices. Work around that and
-	 * skip asserts that are known to fail. */
+	/* Kernels prior to 3.19 dated 8 February, 2015 don't support ethtool -i for dummy devices.
+	 * Work around that and skip asserts that are known to fail. */
 	ethtool_support = nmtstp_run_command ("ethtool -i dummy1_ > /dev/null") == 0;
 	if (ethtool_support) {
 		g_assert (nmp_utils_ethtool_get_driver_info (nmtstp_link_get_typed (platform_1, 0, "dummy1_", NM_LINK_TYPE_DUMMY)->ifindex, &driver_info));

@@ -179,9 +179,9 @@ get_encodings_for_lang (const char *lang,
                         char **encoding2,
                         char **encoding3)
 {
-	struct EncodingTriplet *	encodings;
-	gboolean				success = FALSE;
-	char *				tmp_lang;
+	struct EncodingTriplet *encodings;
+	gboolean success = FALSE;
+	char *tmp_lang;
 
 	g_return_val_if_fail (lang != NULL, FALSE);
 	g_return_val_if_fail (encoding1 != NULL, FALSE);
@@ -3233,7 +3233,7 @@ nm_utils_hwaddr_ntoa_buf (gconstpointer addr, gsize addr_len, gboolean upper_cas
 	if (buf_len < addr_len * 3)
 		g_return_val_if_reached (NULL);
 
-	_bin2str (addr, addr_len, ':', TRUE, buf);
+	_bin2str (addr, addr_len, ':', upper_case, buf);
 	return buf;
 }
 
@@ -3896,8 +3896,8 @@ _nm_utils_inet6_is_token (const struct in6_addr *in6addr)
 gboolean
 nm_utils_check_virtual_device_compatibility (GType virtual_type, GType other_type)
 {
-	g_return_val_if_fail (_nm_setting_type_get_base_type_priority (virtual_type), FALSE);
-	g_return_val_if_fail (_nm_setting_type_get_base_type_priority (other_type), FALSE);
+	g_return_val_if_fail (_nm_setting_type_get_base_type_priority (virtual_type) != NM_SETTING_PRIORITY_INVALID, FALSE);
+	g_return_val_if_fail (_nm_setting_type_get_base_type_priority (other_type)   != NM_SETTING_PRIORITY_INVALID, FALSE);
 
 	if (virtual_type == NM_TYPE_SETTING_BOND) {
 		return (   other_type == NM_TYPE_SETTING_INFINIBAND
@@ -4016,16 +4016,16 @@ _nm_utils_strstrdictkey_hash (gconstpointer a)
 		if (((int) k->type) & ~STRSTRDICTKEY_ALL_SET)
 			g_return_val_if_reached (0);
 
-		h = (h << 5) + h + k->type;
+		h = NM_HASH_COMBINE (h, k->type);
 		if (k->type & STRSTRDICTKEY_ALL_SET) {
 			p = (void *) k->data;
 			for (; *p != '\0'; p++)
-				h = (h << 5) + h + *p;
+				h = NM_HASH_COMBINE (h, *p);
 			if (k->type == STRSTRDICTKEY_ALL_SET) {
 				/* the key contains two strings. Continue... */
-				h = (h << 5) + h + '\0';
+				h = NM_HASH_COMBINE (h, '\0');
 				for (p++; *p != '\0'; p++)
-					h = (h << 5) + h + *p;
+					h = NM_HASH_COMBINE (h, *p);
 			}
 		}
 	}

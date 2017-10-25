@@ -243,7 +243,7 @@ Summary: PPP plugin for NetworkManager
 Group: System Environment/Base
 Requires: %{name}%{?_isa} = %{epoch}:%{version}-%{release}
 Requires: ppp = %{ppp_version}
-Provides: NetworkManager = %{epoch}:%{version}-%{release}
+Requires: NetworkManager = %{epoch}:%{version}-%{release}
 Obsoletes: NetworkManager < %{obsoletes_ppp_plugin}
 
 %description ppp
@@ -430,7 +430,11 @@ intltoolize --automake --copy --force
 	--with-systemdsystemunitdir=%{systemd_dir} \
 	--with-system-ca-path=/etc/pki/tls/cert.pem \
 	--with-dbus-sys-dir=%{dbus_sys_dir} \
+%if %{with test}
 	--with-tests=yes \
+%else
+	--with-tests=no \
+%endif
 	--with-valgrind=no \
 	--enable-ifcfg-rh=yes \
 %if %{with ppp}
@@ -552,8 +556,6 @@ fi
 %{systemd_dir}/NetworkManager.service
 %{systemd_dir}/NetworkManager-wait-online.service
 %{systemd_dir}/NetworkManager-dispatcher.service
-%dir %{systemd_dir}/network-online.target.wants
-%{systemd_dir}/network-online.target.wants/NetworkManager-wait-online.service
 %dir %{_datadir}/doc/NetworkManager/examples
 %{_datadir}/doc/NetworkManager/examples/server.conf
 %doc NEWS AUTHORS README CONTRIBUTING TODO

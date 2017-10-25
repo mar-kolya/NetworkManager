@@ -168,8 +168,11 @@ add_proxy_config (GVariantBuilder *proxy_data, const NMProxyConfig *proxy_config
 static void
 get_ip4_domains (GPtrArray *domains, NMIP4Config *ip4)
 {
+	NMDedupMultiIter ipconf_iter;
 	char *cidr;
-	int i;
+	const NMPlatformIP4Address *address;
+	const NMPlatformIP4Route *routes;
+	guint i;
 
 	/* Extract searches */
 	for (i = 0; i < nm_ip4_config_get_num_searches (ip4); i++)
@@ -180,18 +183,15 @@ get_ip4_domains (GPtrArray *domains, NMIP4Config *ip4)
 		g_ptr_array_add (domains, g_strdup (nm_ip4_config_get_domain (ip4, i)));
 
 	/* Add addresses and routes in CIDR form */
-	for (i = 0; i < nm_ip4_config_get_num_addresses (ip4); i++) {
-		const NMPlatformIP4Address *address = nm_ip4_config_get_address (ip4, i);
 
+	nm_ip_config_iter_ip4_address_for_each (&ipconf_iter, ip4, &address) {
 		cidr = g_strdup_printf ("%s/%u",
 		                        nm_utils_inet4_ntop (address->address, NULL),
 		                        address->plen);
 		g_ptr_array_add (domains, cidr);
 	}
 
-	for (i = 0; i < nm_ip4_config_get_num_routes (ip4); i++) {
-		const NMPlatformIP4Route *routes = nm_ip4_config_get_route (ip4, i);
-
+	nm_ip_config_iter_ip4_route_for_each (&ipconf_iter, ip4, &routes) {
 		cidr = g_strdup_printf ("%s/%u",
 		                        nm_utils_inet4_ntop (routes->network, NULL),
 		                        routes->plen);
@@ -202,8 +202,11 @@ get_ip4_domains (GPtrArray *domains, NMIP4Config *ip4)
 static void
 get_ip6_domains (GPtrArray *domains, NMIP6Config *ip6)
 {
+	NMDedupMultiIter ipconf_iter;
 	char *cidr;
-	int i;
+	const NMPlatformIP6Address *address;
+	const NMPlatformIP6Route *routes;
+	guint i;
 
 	/* Extract searches */
 	for (i = 0; i < nm_ip6_config_get_num_searches (ip6); i++)
@@ -214,18 +217,14 @@ get_ip6_domains (GPtrArray *domains, NMIP6Config *ip6)
 		g_ptr_array_add (domains, g_strdup (nm_ip6_config_get_domain (ip6, i)));
 
 	/* Add addresses and routes in CIDR form */
-	for (i = 0; i < nm_ip6_config_get_num_addresses (ip6); i++) {
-		const NMPlatformIP6Address *address = nm_ip6_config_get_address (ip6, i);
-
+	nm_ip_config_iter_ip6_address_for_each (&ipconf_iter, ip6, &address) {
 		cidr = g_strdup_printf ("%s/%u",
 		                        nm_utils_inet6_ntop (&address->address, NULL),
 		                        address->plen);
 		g_ptr_array_add (domains, cidr);
 	}
 
-	for (i = 0; i < nm_ip6_config_get_num_routes (ip6); i++) {
-		const NMPlatformIP6Route *routes = nm_ip6_config_get_route (ip6, i);
-
+	nm_ip_config_iter_ip6_route_for_each (&ipconf_iter, ip6, &routes) {
 		cidr = g_strdup_printf ("%s/%u",
 		                        nm_utils_inet6_ntop (&routes->network, NULL),
 		                        routes->plen);

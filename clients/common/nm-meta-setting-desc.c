@@ -1759,7 +1759,12 @@ _complete_fcn_vpn_service_type (ARGS_COMPLETE_FCN)
 				values[j] = values[i];
 			j++;
 		}
-		values[j++] = NULL;
+		if (j)
+			values[j++] = NULL;
+		else {
+			g_free (values);
+			values = NULL;
+		}
 	}
 	return (const char *const*) (*out_to_free = values);
 }
@@ -2378,7 +2383,12 @@ _complete_fcn_connection_type (ARGS_COMPLETE_FCN)
 				result[j++] = g_strdup (v);
 		}
 	}
-	result[j++] = NULL;
+	if (j)
+		result[j++] = NULL;
+	else {
+		g_free (result);
+		result = NULL;
+	}
 
 	return (const char *const*) (*out_to_free = result);
 }
@@ -2526,10 +2536,14 @@ _complete_fcn_connection_master (ARGS_COMPLETE_FCN)
 		if (v && (!text || strncmp (text, v, text_len) == 0))
 			result[j++] = g_strdup (v);
 	}
-	result[j++] = NULL;
+	if (j)
+		result[j++] = NULL;
+	else {
+		g_free (result);
+		result = NULL;
+	}
 
-	*out_to_free = NULL;
-	return (const char *const*) result;
+	return (const char *const*) (*out_to_free = result);
 }
 
 static gboolean
@@ -4901,6 +4915,12 @@ static const NMMetaPropertyInfo *const property_infos_BRIDGE[] = {
 		.prompt =                       N_("MAC address ageing time [300]"),
 		.property_type =                &_pt_gobject_int,
 	),
+	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_GROUP_FORWARD_MASK,
+		.is_cli_option =                TRUE,
+		.property_alias =               "group-forward-mask",
+		.prompt =                       N_("Group forward mask [0]"),
+		.property_type =                &_pt_gobject_int,
+	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_BRIDGE_MULTICAST_SNOOPING,
 		.is_cli_option =                TRUE,
 		.property_alias =               "multicast-snooping",
@@ -4980,6 +5000,18 @@ static const NMMetaPropertyInfo *const property_infos_CONNECTION[] = {
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_STABLE_ID,
 		.property_type =                &_pt_gobject_string,
 	),
+[_NM_META_PROPERTY_TYPE_CONNECTION_TYPE] =
+		PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_TYPE,
+			.is_cli_option =                TRUE,
+			.property_alias =               "type",
+			.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
+			.prompt =                       NM_META_TEXT_PROMPT_CON_TYPE,
+			.property_type = DEFINE_PROPERTY_TYPE (
+				.get_fcn =                  _get_fcn_gobject,
+				.set_fcn =                  _set_fcn_connection_type,
+				.complete_fcn =             _complete_fcn_connection_type,
+			),
+		),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_INTERFACE_NAME,
 		.is_cli_option =                TRUE,
 		.property_alias =               "ifname",
@@ -4989,18 +5021,6 @@ static const NMMetaPropertyInfo *const property_infos_CONNECTION[] = {
 			.get_fcn =                  _get_fcn_gobject,
 			.set_fcn =                  _set_fcn_gobject_ifname,
 			.complete_fcn =             _complete_fcn_gobject_devices,
-		),
-	),
-[_NM_META_PROPERTY_TYPE_CONNECTION_TYPE] =
-	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_TYPE,
-		.is_cli_option =                TRUE,
-		.property_alias =               "type",
-		.inf_flags =                    NM_META_PROPERTY_INF_FLAG_REQD,
-		.prompt =                       NM_META_TEXT_PROMPT_CON_TYPE,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_gobject,
-			.set_fcn =                  _set_fcn_connection_type,
-			.complete_fcn =             _complete_fcn_connection_type,
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_AUTOCONNECT,
@@ -5769,6 +5789,12 @@ static const NMMetaPropertyInfo *const property_infos_OLPC_MESH[] = {
 #undef  _CURRENT_NM_META_SETTING_TYPE
 #define _CURRENT_NM_META_SETTING_TYPE NM_META_SETTING_TYPE_PPPOE
 static const NMMetaPropertyInfo *const property_infos_PPPOE[] = {
+	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPPOE_PARENT,
+		.is_cli_option =                TRUE,
+		.property_alias =               "parent",
+		.prompt =                       N_("PPPoE parent device"),
+		.property_type =                &_pt_gobject_string,
+	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_PPPOE_SERVICE,
 		.is_cli_option =                TRUE,
 		.property_alias =               "service",
@@ -6588,16 +6614,6 @@ _setting_init_fcn_adsl (ARGS_SETTING_INIT_FCN)
 }
 
 static void
-_setting_init_fcn_bluetooth (ARGS_SETTING_INIT_FCN)
-{
-	if (init_type == NM_META_ACCESSOR_SETTING_INIT_TYPE_CLI) {
-		g_object_set (NM_SETTING_BLUETOOTH (setting),
-		              NM_SETTING_BLUETOOTH_TYPE, NM_SETTING_BLUETOOTH_TYPE_PANU,
-		              NULL);
-	}
-}
-
-static void
 _setting_init_fcn_cdma (ARGS_SETTING_INIT_FCN)
 {
 	if (init_type == NM_META_ACCESSOR_SETTING_INIT_TYPE_CLI) {
@@ -6779,8 +6795,9 @@ const NMMetaSettingInfoEditor nm_meta_setting_infos_editor[] = {
 			NM_META_SETTING_VALID_PART_ITEM (CONNECTION,            TRUE),
 			NM_META_SETTING_VALID_PART_ITEM (BLUETOOTH,             TRUE),
 			NM_META_SETTING_VALID_PART_ITEM (BRIDGE,                FALSE),
+			NM_META_SETTING_VALID_PART_ITEM (GSM,                   FALSE),
+			NM_META_SETTING_VALID_PART_ITEM (CDMA,                  FALSE),
 		),
-		.setting_init_fcn =             _setting_init_fcn_bluetooth,
 	),
 	SETTING_INFO (BOND,
 		.valid_parts = NM_META_SETTING_VALID_PARTS (

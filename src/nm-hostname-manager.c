@@ -48,6 +48,9 @@
 #define HOSTNAME_FILE_UCASE_HOSTNAME "/etc/HOSTNAME"
 #define HOSTNAME_FILE_GENTOO         "/etc/conf.d/hostname"
 
+#define IFCFG_DIR                    SYSCONFDIR "/sysconfig/network"
+#define CONF_DHCP                    IFCFG_DIR "/dhcp"
+
 #if (defined(HOSTNAME_PERSIST_SUSE) + defined(HOSTNAME_PERSIST_SLACKWARE) + defined(HOSTNAME_PERSIST_GENTOO)) > 1
 #error "Can only define one of HOSTNAME_PERSIST_*"
 #endif
@@ -577,7 +580,7 @@ constructed (GObject *object)
 	NMHostnameManagerPrivate *priv = NM_HOSTNAME_MANAGER_GET_PRIVATE (self);
 	GDBusProxy *proxy;
 	GVariant *variant;
-	gs_free GError *error = NULL;
+	gs_free_error GError *error = NULL;
 
 	proxy = g_dbus_proxy_new_for_bus_sync (G_BUS_TYPE_SYSTEM, 0, NULL,
 	                                       HOSTNAMED_SERVICE_NAME, HOSTNAMED_SERVICE_PATH,

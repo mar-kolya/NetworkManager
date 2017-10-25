@@ -24,6 +24,8 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+#include "nm-utils/nm-dedup-multi.h"
+
 #include "NetworkManagerUtils.h"
 #include "dhcp/nm-dhcp-dhclient-utils.h"
 #include "dhcp/nm-dhcp-utils.h"
@@ -34,6 +36,8 @@
 #include "nm-test-utils-core.h"
 
 #define DEBUG 1
+
+static const int IFINDEX = 5;
 
 static void
 test_config (const char *orig,
@@ -66,17 +70,16 @@ test_config (const char *orig,
 	                                      &new_client_id);
 	g_assert (new != NULL);
 
-#if DEBUG
-	if (   strlen (new) != strlen (expected)
-	    || strcmp (new, expected)) {
-		g_message ("\n- NEW ---------------------------------\n"
+	if (!nm_streq (new, expected)) {
+		g_message ("\n* OLD ---------------------------------\n"
 		           "%s"
-		           "+ EXPECTED ++++++++++++++++++++++++++++++\n"
+		           "\n- NEW -----------------------------------\n"
 		           "%s"
-		           "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
-		           new, expected);
+		           "\n+ EXPECTED ++++++++++++++++++++++++++++++\n"
+		           "%s"
+		           "\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+		           orig, new, expected);
 	}
-#endif
 	g_assert_cmpstr (new, ==, expected);
 
 	if (expected_new_client_id) {
@@ -833,11 +836,66 @@ test_interface2 (void)
 	             NULL);
 }
 
+static void
+test_config_req_intf (void)
+{
+	static const char *const orig = \
+		"request subnet-mask, broadcast-address, routers,\n"
+		"	rfc3442-classless-static-routes,\n"
+		"	interface-mtu, host-name, domain-name, domain-search,\n"
+		"	domain-name-servers, nis-domain, nis-servers,\n"
+		"	nds-context, nds-servers, nds-tree-name,\n"
+		"	netbios-name-servers, netbios-dd-server,\n"
+		"	netbios-node-type, netbios-scope, ntp-servers;\n"
+		"";
+	static const char *const expected = \
+		"# Created by NetworkManager\n"
+		"# Merged from /path/to/dhclient.conf\n"
+		"\n"
+		"\n"
+		"option rfc3442-classless-static-routes code 121 = array of unsigned integer 8;\n"
+		"option ms-classless-static-routes code 249 = array of unsigned integer 8;\n"
+		"option wpad code 252 = string;\n"
+		"\n"
+		"request; # override dhclient defaults\n"
+		"also request subnet-mask;\n"
+		"also request broadcast-address;\n"
+		"also request routers;\n"
+		"also request rfc3442-classless-static-routes;\n"
+		"also request interface-mtu;\n"
+		"also request host-name;\n"
+		"also request domain-name;\n"
+		"also request domain-search;\n"
+		"also request domain-name-servers;\n"
+		"also request nis-domain;\n"
+		"also request nis-servers;\n"
+		"also request nds-context;\n"
+		"also request nds-servers;\n"
+		"also request nds-tree-name;\n"
+		"also request netbios-name-servers;\n"
+		"also request netbios-dd-server;\n"
+		"also request netbios-node-type;\n"
+		"also request netbios-scope;\n"
+		"also request ntp-servers;\n"
+		"also request ms-classless-static-routes;\n"
+		"also request static-routes;\n"
+		"also request wpad;\n"
+		"\n";
+
+	test_config (orig, expected,
+	             FALSE, NULL, FALSE,
+	             NULL,
+	             NULL,
+	             "eth0",
+	             NULL);
+}
+
 /*****************************************************************************/
 
 static void
 test_read_lease_ip4_config_basic (void)
 {
+	nm_auto_unref_dedup_multi_index NMDedupMultiIndex *multi_idx = nm_dedup_multi_index_new ();
 	GError *error = NULL;
 	char *contents = NULL;
 	gboolean success;
@@ -854,7 +912,7 @@ test_read_lease_ip4_config_basic (void)
 
 	/* Date from before the least expiration */
 	now = g_date_time_new_utc (2013, 11, 1, 19, 55, 32);
-	leases = nm_dhcp_dhclient_read_lease_ip_configs ("wlan0", -1, contents, FALSE, now);
+	leases = nm_dhcp_dhclient_read_lease_ip_configs (multi_idx, "wlan0", IFINDEX, contents, FALSE, now);
 	g_assert_cmpint (g_slist_length (leases), ==, 2);
 
 	/* IP4Config #1 */
@@ -863,19 +921,19 @@ test_read_lease_ip4_config_basic (void)
 
 	/* Address */
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (config), ==, 1);
-	g_assert (inet_aton ("192.168.1.180", (struct in_addr *) &expected_addr));
-	addr = nm_ip4_config_get_address (config, 0);
+	expected_addr = nmtst_inet4_from_string ("192.168.1.180");
+	addr = _nmtst_nm_ip4_config_get_address (config, 0);
 	g_assert_cmpint (addr->address, ==, expected_addr);
 	g_assert_cmpint (addr->peer_address, ==, expected_addr);
 	g_assert_cmpint (addr->plen, ==, 24);
 
 	/* Gateway */
-	g_assert (inet_aton ("192.168.1.1", (struct in_addr *) &expected_addr));
+	expected_addr = nmtst_inet4_from_string ("192.168.1.1");
 	g_assert_cmpint (nm_ip4_config_get_gateway (config), ==, expected_addr);
 
 	/* DNS */
 	g_assert_cmpint (nm_ip4_config_get_num_nameservers (config), ==, 1);
-	g_assert (inet_aton ("192.168.1.1", (struct in_addr *) &expected_addr));
+	expected_addr = nmtst_inet4_from_string ("192.168.1.1");
 	g_assert_cmpint (nm_ip4_config_get_nameserver (config, 0), ==, expected_addr);
 
 	g_assert_cmpint (nm_ip4_config_get_num_domains (config), ==, 0);
@@ -886,21 +944,21 @@ test_read_lease_ip4_config_basic (void)
 
 	/* Address */
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (config), ==, 1);
-	g_assert (inet_aton ("10.77.52.141", (struct in_addr *) &expected_addr));
-	addr = nm_ip4_config_get_address (config, 0);
+	expected_addr = nmtst_inet4_from_string ("10.77.52.141");
+	addr = _nmtst_nm_ip4_config_get_address (config, 0);
 	g_assert_cmpint (addr->address, ==, expected_addr);
 	g_assert_cmpint (addr->peer_address, ==, expected_addr);
 	g_assert_cmpint (addr->plen, ==, 8);
 
 	/* Gateway */
-	g_assert (inet_aton ("10.77.52.254", (struct in_addr *) &expected_addr));
+	expected_addr = nmtst_inet4_from_string ("10.77.52.254");
 	g_assert_cmpint (nm_ip4_config_get_gateway (config), ==, expected_addr);
 
 	/* DNS */
 	g_assert_cmpint (nm_ip4_config_get_num_nameservers (config), ==, 2);
-	g_assert (inet_aton ("8.8.8.8", (struct in_addr *) &expected_addr));
+	expected_addr = nmtst_inet4_from_string ("8.8.8.8");
 	g_assert_cmpint (nm_ip4_config_get_nameserver (config, 0), ==, expected_addr);
-	g_assert (inet_aton ("8.8.4.4", (struct in_addr *) &expected_addr));
+	expected_addr = nmtst_inet4_from_string ("8.8.4.4");
 	g_assert_cmpint (nm_ip4_config_get_nameserver (config, 1), ==, expected_addr);
 
 	/* Domains */
@@ -915,6 +973,7 @@ test_read_lease_ip4_config_basic (void)
 static void
 test_read_lease_ip4_config_expired (void)
 {
+	nm_auto_unref_dedup_multi_index NMDedupMultiIndex *multi_idx = nm_dedup_multi_index_new ();
 	GError *error = NULL;
 	char *contents = NULL;
 	gboolean success;
@@ -928,7 +987,7 @@ test_read_lease_ip4_config_expired (void)
 
 	/* Date from *after* the lease expiration */
 	now = g_date_time_new_utc (2013, 12, 1, 19, 55, 32);
-	leases = nm_dhcp_dhclient_read_lease_ip_configs ("wlan0", -1, contents, FALSE, now);
+	leases = nm_dhcp_dhclient_read_lease_ip_configs (multi_idx, "wlan0", IFINDEX, contents, FALSE, now);
 	g_assert (leases == NULL);
 
 	g_date_time_unref (now);
@@ -938,6 +997,7 @@ test_read_lease_ip4_config_expired (void)
 static void
 test_read_lease_ip4_config_expect_failure (gconstpointer user_data)
 {
+	nm_auto_unref_dedup_multi_index NMDedupMultiIndex *multi_idx = nm_dedup_multi_index_new ();
 	GError *error = NULL;
 	char *contents = NULL;
 	gboolean success;
@@ -950,7 +1010,7 @@ test_read_lease_ip4_config_expect_failure (gconstpointer user_data)
 
 	/* Date from before the least expiration */
 	now = g_date_time_new_utc (2013, 11, 1, 1, 1, 1);
-	leases = nm_dhcp_dhclient_read_lease_ip_configs ("wlan0", -1, contents, FALSE, now);
+	leases = nm_dhcp_dhclient_read_lease_ip_configs (multi_idx, "wlan0", IFINDEX, contents, FALSE, now);
 	g_assert (leases == NULL);
 
 	g_date_time_unref (now);
@@ -984,6 +1044,7 @@ main (int argc, char **argv)
 	g_test_add_func ("/dhcp/dhclient/duids", test_duids);
 	g_test_add_func ("/dhcp/dhclient/interface/1", test_interface1);
 	g_test_add_func ("/dhcp/dhclient/interface/2", test_interface2);
+	g_test_add_func ("/dhcp/dhclient/config/req_intf", test_config_req_intf);
 
 	g_test_add_func ("/dhcp/dhclient/read_duid_from_leasefile", test_read_duid_from_leasefile);
 	g_test_add_func ("/dhcp/dhclient/read_commented_duid_from_leasefile", test_read_commented_duid_from_leasefile);

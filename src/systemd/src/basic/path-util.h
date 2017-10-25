@@ -46,7 +46,7 @@ char* path_kill_slashes(char *path);
 char* path_startswith(const char *path, const char *prefix) _pure_;
 int path_compare(const char *a, const char *b) _pure_;
 bool path_equal(const char *a, const char *b) _pure_;
-bool path_equal_or_files_same(const char *a, const char *b);
+bool path_equal_or_files_same(const char *a, const char *b, int flags);
 char* path_join(const char *root, const char *path, const char *rest);
 
 static inline bool path_equal_ptr(const char *a, const char *b) {
@@ -143,3 +143,13 @@ bool is_deviceallow_pattern(const char *path);
 int systemd_installation_has_version(const char *root, unsigned minimal_version);
 
 bool dot_or_dot_dot(const char *path);
+
+static inline const char *skip_dev_prefix(const char *p) {
+        const char *e;
+
+        /* Drop any /dev prefix if there is any */
+
+        e = path_startswith(p, "/dev/");
+
+        return e ?: p;
+}

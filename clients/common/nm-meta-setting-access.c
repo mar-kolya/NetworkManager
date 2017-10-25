@@ -283,10 +283,18 @@ nm_meta_abstract_info_complete (const NMMetaAbstractInfo *abstract_info,
 
 	nm_assert (!*out_to_free || values == (const char *const*) *out_to_free);
 
-	if (!text || !text[0] || !values || !values[0])
+	if (!values)
+		return NULL;
+
+	if (!values[0]) {
+		nm_clear_g_free (out_to_free);
+		return NULL;
+	}
+
+	if (!text || !text[0])
 		return values;
 
-	/* for convenience, we all the complete_fcn() implementations to
+	/* for convenience, we allow the complete_fcn() implementations to
 	 * ignore "text". We filter out invalid matches here. */
 
 	text_len = strlen (text);
@@ -294,13 +302,20 @@ nm_meta_abstract_info_complete (const NMMetaAbstractInfo *abstract_info,
 	if (*out_to_free) {
 		char **v = *out_to_free;
 
-		for (i =0, j = 0; v[i]; i++) {
-			if (strncmp (v[i], text, text_len) != 0)
+		for (i = 0, j = 0; v[i]; i++) {
+			if (strncmp (v[i], text, text_len) != 0) {
+				g_free (v[i]);
 				continue;
+			}
 			v[j++] = v[i];
 		}
-		v[j++] = NULL;
-		return (const char *const*) *out_to_free;
+		if (j)
+			v[j++] = NULL;
+		else {
+			g_free (v);
+			*out_to_free = v = NULL;
+		}
+		return (const char *const*) v;
 	} else {
 		const char *const*v = values;
 		char **r;
@@ -312,6 +327,8 @@ nm_meta_abstract_info_complete (const NMMetaAbstractInfo *abstract_info,
 		}
 		if (j == i)
 			return values;
+		else if (!j)
+			return NULL;
 
 		r = g_new (char *, j + 1);
 		v = values;

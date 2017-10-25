@@ -140,6 +140,8 @@ permission_to_string (NMClientPermission perm)
 		return NM_AUTH_PERMISSION_CHECKPOINT_ROLLBACK;
 	case NM_CLIENT_PERMISSION_ENABLE_DISABLE_STATISTICS:
 		return NM_AUTH_PERMISSION_ENABLE_DISABLE_STATISTICS;
+	case NM_CLIENT_PERMISSION_ENABLE_DISABLE_CONNECTIVITY_CHECK:
+		return NM_AUTH_PERMISSION_ENABLE_DISABLE_CONNECTIVITY_CHECK;
 	default:
 		return _("unknown");
 	}
@@ -655,7 +657,7 @@ show_general_logging (NmCli *nmc)
 {
 	gs_free char *level_cache = NULL;
 	gs_free char *domains_cache = NULL;
-	gs_free GError *error = NULL;
+	gs_free_error GError *error = NULL;
 	const char *fields_str = NULL;
 	GetGeneralLoggingData d = {
 		.level = &level_cache,
@@ -1194,10 +1196,10 @@ device_overview (NmCli *nmc, NMDevice *device)
 	else
 		g_string_append_printf (outbuf, "%s, ", _("hw"));
 
-	if (   nm_device_get_ip_iface (device)
-	    && g_strcmp0 (nm_device_get_ip_iface (device), nm_device_get_iface (device))
-	    && g_strcmp0 (nm_device_get_ip_iface (device), ""))
-		g_string_append_printf (outbuf, "%s %s,", _("iface"), nm_device_get_ip_iface (device));
+	if (!NM_IN_STRSET (nm_device_get_ip_iface (device),
+	                   NULL,
+	                   nm_device_get_iface (device)))
+		g_string_append_printf (outbuf, "%s %s, ", _("iface"), nm_device_get_ip_iface (device));
 
 	if (nm_device_get_physical_port_id (device))
 		g_string_append_printf (outbuf, "%s %s, ", _("port"), nm_device_get_physical_port_id (device));
