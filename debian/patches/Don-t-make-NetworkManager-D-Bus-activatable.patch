@@ -9,10 +9,10 @@ to be autostarted by a client request.
  data/NetworkManager.service.in | 1 -
  2 files changed, 6 deletions(-)
 
-Index: NetworkManager/Makefile.am
-===================================================================
---- NetworkManager.orig/Makefile.am
-+++ NetworkManager/Makefile.am
+diff --git a/Makefile.am b/Makefile.am
+index e8a6a8a..afb4951 100644
+--- a/Makefile.am
++++ b/Makefile.am
 @@ -3585,11 +3585,6 @@ endif
  data/NetworkManager-dispatcher.service: $(srcdir)/data/NetworkManager-dispatcher.service.in
  	$(AM_V_GEN) $(data_edit) $< >$@
@@ -25,10 +25,10 @@ Index: NetworkManager/Makefile.am
  endif
  
  examples_DATA += data/server.conf
-Index: NetworkManager/data/NetworkManager.service.in
-===================================================================
---- NetworkManager.orig/data/NetworkManager.service.in
-+++ NetworkManager/data/NetworkManager.service.in
+diff --git a/data/NetworkManager.service.in b/data/NetworkManager.service.in
+index 95d58f9..1502b89 100644
+--- a/data/NetworkManager.service.in
++++ b/data/NetworkManager.service.in
 @@ -24,6 +24,5 @@ ProtectHome=read-only
  
  [Install]

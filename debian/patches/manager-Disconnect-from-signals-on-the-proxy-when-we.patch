@@ -1,8 +1,6 @@
-From 297862b0e9a6b08e506a9976f2e464f68ba398d2 Mon Sep 17 00:00:00 2001
 From: Iain Lane <iain@orangesquash.org.uk>
 Date: Wed, 20 Sep 2017 15:01:41 +0100
-Subject: [PATCH 1/2] manager: Disconnect from signals on the proxy when we're
- disposed
+Subject: manager: Disconnect from signals on the proxy when we're disposed
 
 We're calling a callback on a proxy after it has been disposed. We
 should make sure to disconnect from it when we go away.
@@ -13,15 +11,14 @@ https://bugzilla.gnome.org/show_bug.cgi?id=787897
 Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/gnome-control-center/+bug/1704618
 Origin: Upstream
 Applied-Upstream: 1.8.5
-
 ---
  libnm/nm-manager.c | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
 
-Index: NetworkManager/libnm/nm-manager.c
-===================================================================
---- NetworkManager.orig/libnm/nm-manager.c
-+++ NetworkManager/libnm/nm-manager.c
+diff --git a/libnm/nm-manager.c b/libnm/nm-manager.c
+index 004c5c9..05d2256 100644
+--- a/libnm/nm-manager.c
++++ b/libnm/nm-manager.c
 @@ -202,8 +202,8 @@ init_dbus (NMObject *object)
  	                                property_info);
  

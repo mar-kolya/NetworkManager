@@ -10,10 +10,10 @@ See also: https://blueprints.launchpad.net/ubuntu/+spec/foundations-p-dns-resolv
  src/dns/nm-dns-manager.c | 6 +++---
  2 files changed, 5 insertions(+), 5 deletions(-)
 
-Index: NetworkManager/src/dns/nm-dns-dnsmasq.c
-===================================================================
---- NetworkManager.orig/src/dns/nm-dns-dnsmasq.c
-+++ NetworkManager/src/dns/nm-dns-dnsmasq.c
+diff --git a/src/dns/nm-dns-dnsmasq.c b/src/dns/nm-dns-dnsmasq.c
+index cb311df..74f426d 100644
+--- a/src/dns/nm-dns-dnsmasq.c
++++ b/src/dns/nm-dns-dnsmasq.c
 @@ -500,8 +500,8 @@ start_dnsmasq (NMDnsDnsmasq *self)
  	argv[idx++] = "--no-hosts"; /* don't use /etc/hosts to resolve */
  	argv[idx++] = "--bind-interfaces";
@@ -25,10 +25,10 @@ Index: NetworkManager/src/dns/nm-dns-dnsmasq.c
  	argv[idx++] = "--clear-on-reload"; /* clear cache when dns server changes */
  	argv[idx++] = "--conf-file=/dev/null"; /* avoid loading /etc/dnsmasq.conf */
  	argv[idx++] = "--proxy-dnssec"; /* Allow DNSSEC to pass through */
-Index: NetworkManager/src/dns/nm-dns-manager.c
-===================================================================
---- NetworkManager.orig/src/dns/nm-dns-manager.c
-+++ NetworkManager/src/dns/nm-dns-manager.c
+diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
+index 75f8a10..c87b6db 100644
+--- a/src/dns/nm-dns-manager.c
++++ b/src/dns/nm-dns-manager.c
 @@ -1162,14 +1162,14 @@ update_dns (NMDnsManager *self,
  		;
  	}

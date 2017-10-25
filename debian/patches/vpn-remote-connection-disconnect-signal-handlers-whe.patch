@@ -1,8 +1,6 @@
-From b363a6cfad5996b5436b6f7c1d9337068fcb4c99 Mon Sep 17 00:00:00 2001
 From: Iain Lane <iain@orangesquash.org.uk>
 Date: Fri, 22 Sep 2017 11:48:05 +0100
-Subject: [PATCH 2/2] {vpn,remote}-connection: disconnect signal handlers when
- disposed
+Subject: {vpn,remote}-connection: disconnect signal handlers when disposed
 
 GNOME Settings 3.26 is crashing every time a VPN connection changed its
 state. After some digging, a debug message was put on dispose, and this
@@ -32,17 +30,16 @@ https://bugzilla.gnome.org/show_bug.cgi?id=787893
 Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/network-manager/+bug/1718006
 Origin: upstream
 Applied-Upstream: 1.8.5
-
 ---
  libnm/nm-remote-connection.c | 6 +++---
  libnm/nm-vpn-connection.c    | 4 ++--
  2 files changed, 5 insertions(+), 5 deletions(-)
 
-Index: NetworkManager/libnm/nm-remote-connection.c
-===================================================================
---- NetworkManager.orig/libnm/nm-remote-connection.c
-+++ NetworkManager/libnm/nm-remote-connection.c
-@@ -641,7 +641,7 @@ init_sync (GInitable *initable, GCancell
+diff --git a/libnm/nm-remote-connection.c b/libnm/nm-remote-connection.c
+index 0f7ea58..5cd4255 100644
+--- a/libnm/nm-remote-connection.c
++++ b/libnm/nm-remote-connection.c
+@@ -641,7 +641,7 @@ init_sync (GInitable *initable, GCancellable *cancellable, GError **error)
  	GVariant *settings;
  
  	priv->proxy = NMDBUS_SETTINGS_CONNECTION (_nm_object_get_proxy (NM_OBJECT (initable), NM_DBUS_INTERFACE_SETTINGS_CONNECTION));
@@ -51,7 +48,7 @@ Index: NetworkManager/libnm/nm-remote-connection.c
  
  	if (nmdbus_settings_connection_call_get_settings_sync (priv->proxy,
  	                                                       &settings,
-@@ -730,8 +730,8 @@ init_async (GAsyncInitable *initable, in
+@@ -730,8 +730,8 @@ init_async (GAsyncInitable *initable, int io_priority,
  	priv->proxy = NMDBUS_SETTINGS_CONNECTION (_nm_object_get_proxy (NM_OBJECT (initable),
  	                                          NM_DBUS_INTERFACE_SETTINGS_CONNECTION));
  
@@ -62,10 +59,10 @@ Index: NetworkManager/libnm/nm-remote-connection.c
  
  	nmdbus_settings_connection_call_get_settings (NM_REMOTE_CONNECTION_GET_PRIVATE (init_data->initable)->proxy,
  	                                              init_data->cancellable,
-Index: NetworkManager/libnm/nm-vpn-connection.c
-===================================================================
---- NetworkManager.orig/libnm/nm-vpn-connection.c
-+++ NetworkManager/libnm/nm-vpn-connection.c
+diff --git a/libnm/nm-vpn-connection.c b/libnm/nm-vpn-connection.c
+index 814f45f..636c395 100644
+--- a/libnm/nm-vpn-connection.c
++++ b/libnm/nm-vpn-connection.c
 @@ -144,8 +144,8 @@ init_dbus (NMObject *object)
  	                                property_info);
  

@@ -15,10 +15,10 @@ Closes: #742933
  src/nm-sleep-monitor.c | 5 +++++
  1 file changed, 5 insertions(+)
 
-Index: NetworkManager/src/nm-sleep-monitor.c
-===================================================================
---- NetworkManager.orig/src/nm-sleep-monitor.c
-+++ NetworkManager/src/nm-sleep-monitor.c
+diff --git a/src/nm-sleep-monitor.c b/src/nm-sleep-monitor.c
+index 037db11..18282f1 100644
+--- a/src/nm-sleep-monitor.c
++++ b/src/nm-sleep-monitor.c
 @@ -25,6 +25,7 @@
  #include <string.h>
  #include <sys/stat.h>

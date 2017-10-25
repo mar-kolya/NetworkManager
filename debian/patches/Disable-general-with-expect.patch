@@ -7,10 +7,10 @@ which tends to fail on ppc64el and arm64
  Makefile.am | 1 -
  1 file changed, 1 deletion(-)
 
-Index: NetworkManager/Makefile.am
-===================================================================
---- NetworkManager.orig/Makefile.am
-+++ NetworkManager/Makefile.am
+diff --git a/Makefile.am b/Makefile.am
+index eedc1b8..0c699c6 100644
+--- a/Makefile.am
++++ b/Makefile.am
 @@ -2962,7 +2962,6 @@ src_tests_ldadd = \
  
  check_programs += \

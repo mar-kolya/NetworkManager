@@ -5,14 +5,14 @@ Subject: dns-manager: don't merge split-DNS search domains
 Signed-off-by: Mathieu Trudel-Lapierre <mathieu.trudel-lapierre@canonical.com>
 Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/network-manager/+bug/1592721
 ---
- src/dns/nm-dns-manager.c | 36 ++++++++++++++++++++----------------
- 1 file changed, 20 insertions(+), 16 deletions(-)
+ src/dns/nm-dns-manager.c | 38 ++++++++++++++++++++------------------
+ 1 file changed, 20 insertions(+), 18 deletions(-)
 
-Index: NetworkManager/src/dns/nm-dns-manager.c
-===================================================================
---- NetworkManager.orig/src/dns/nm-dns-manager.c
-+++ NetworkManager/src/dns/nm-dns-manager.c
-@@ -295,7 +295,7 @@ add_dns_option_item (GPtrArray *array, c
+diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
+index c87b6db..60baf1e 100644
+--- a/src/dns/nm-dns-manager.c
++++ b/src/dns/nm-dns-manager.c
+@@ -295,7 +295,7 @@ add_dns_option_item (GPtrArray *array, const char *str, gboolean ipv6)
  }
  
  static void
@@ -21,7 +21,7 @@ Index: NetworkManager/src/dns/nm-dns-manager.c
  {
  	guint32 num, num_domains, num_searches, i;
  
-@@ -308,13 +308,14 @@ merge_one_ip4_config (NMResolvConfData *
+@@ -308,13 +308,14 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
  	num_domains = nm_ip4_config_get_num_domains (src);
  	num_searches = nm_ip4_config_get_num_searches (src);
  
@@ -43,7 +43,7 @@ Index: NetworkManager/src/dns/nm-dns-manager.c
  	}
  
  	if (num_domains > 1 || !num_searches) {
-@@ -351,7 +352,7 @@ merge_one_ip4_config (NMResolvConfData *
+@@ -351,7 +352,7 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
  }
  
  static void
@@ -52,7 +52,7 @@ Index: NetworkManager/src/dns/nm-dns-manager.c
  {
  	guint32 num, num_domains, num_searches, i;
  
-@@ -378,13 +379,14 @@ merge_one_ip6_config (NMResolvConfData *
+@@ -378,13 +379,14 @@ merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
  	num_domains = nm_ip6_config_get_num_domains (src);
  	num_searches = nm_ip6_config_get_num_searches (src);
  
@@ -74,7 +74,7 @@ Index: NetworkManager/src/dns/nm-dns-manager.c
  	}
  
  	if (num_domains > 1 || !num_searches) {
-@@ -412,9 +414,9 @@ merge_one_ip_config_data (NMResolvConfDa
+@@ -412,9 +414,9 @@ merge_one_ip_config_data (NMResolvConfData *rc,
                            NMDnsIPConfigData *data)
  {
  	if (NM_IS_IP4_CONFIG (data->config))
