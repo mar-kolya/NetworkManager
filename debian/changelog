@@ -1,3 +1,13 @@
+network-manager (1.9.2-dev-1kolya2~1.gbpa1d85f) UNRELEASED; urgency=medium
+
+  ** SNAPSHOT build @a1d85f75a4c6521719b10fd7a9fec768706c051f **
+
+  * Add dbp.conf
+  * refresh patches
+  * Rediff patches
+
+ -- Nikolay Martynov <mar.kolya@gmail.com>  Tue, 24 Oct 2017 23:22:55 -0400
+
 network-manager (1.8.4-1ubuntu3) artful; urgency=medium
 
   * New no-change upload after more launchpad tweaking
