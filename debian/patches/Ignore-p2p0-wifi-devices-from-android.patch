@@ -7,10 +7,10 @@ Subject: Ignore p2p0 wifi devices from android.
  1 file changed, 10 insertions(+)
 
 diff --git a/src/nm-manager.c b/src/nm-manager.c
-index d94b959..4cf831d 100644
+index 4b4e621..421c161 100644
 --- a/src/nm-manager.c
 +++ b/src/nm-manager.c
-@@ -2313,6 +2313,16 @@ platform_link_added (NMManager *self,
+@@ -2375,6 +2375,16 @@ platform_link_added (NMManager *self,
  		!strncmp (plink->name, "ccmni", NM_STRLEN ("ccmni")))
  		return;
  

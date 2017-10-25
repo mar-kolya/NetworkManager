@@ -13,10 +13,10 @@ See also: https://blueprints.launchpad.net/ubuntu/+spec/foundations-p-dns-resolv
  2 files changed, 3 insertions(+), 3 deletions(-)
 
 diff --git a/src/dns/nm-dns-dnsmasq.c b/src/dns/nm-dns-dnsmasq.c
-index 5223638..ca06f04 100644
+index cb311df..e2804b7 100644
 --- a/src/dns/nm-dns-dnsmasq.c
 +++ b/src/dns/nm-dns-dnsmasq.c
-@@ -508,7 +508,7 @@ start_dnsmasq (NMDnsDnsmasq *self)
+@@ -500,7 +500,7 @@ start_dnsmasq (NMDnsDnsmasq *self)
  	argv[idx++] = "--no-hosts"; /* don't use /etc/hosts to resolve */
  	argv[idx++] = "--bind-interfaces";
  	argv[idx++] = "--pid-file=" PIDFILE;
@@ -26,10 +26,10 @@ index 5223638..ca06f04 100644
  	argv[idx++] = "--clear-on-reload"; /* clear cache when dns server changes */
  	argv[idx++] = "--conf-file=/dev/null"; /* avoid loading /etc/dnsmasq.conf */
 diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
-index cc9be29..a5470aa 100644
+index 75f8a10..c201d42 100644
 --- a/src/dns/nm-dns-manager.c
 +++ b/src/dns/nm-dns-manager.c
-@@ -1170,14 +1170,14 @@ update_dns (NMDnsManager *self,
+@@ -1162,14 +1162,14 @@ update_dns (NMDnsManager *self,
  		;
  	}
  

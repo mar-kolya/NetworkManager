@@ -8,10 +8,10 @@ Return if self is not NMManager or it will crash.
  1 file changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/libnm/nm-manager.c b/libnm/nm-manager.c
-index 095b83d..a3ee7ee 100644
+index 004c5c9..b0ff834 100644
 --- a/libnm/nm-manager.c
 +++ b/libnm/nm-manager.c
-@@ -791,7 +791,7 @@ find_active_connection_by_path (NMManager *self, const char *ac_path)
+@@ -825,7 +825,7 @@ find_active_connection_by_path (NMManager *self, const char *ac_path)
  static void
  recheck_pending_activations (NMManager *self)
  {
@@ -20,7 +20,7 @@ index 095b83d..a3ee7ee 100644
  	CList *iter, *safe;
  	NMActiveConnection *candidate;
  	const GPtrArray *devices;
-@@ -801,6 +801,10 @@ recheck_pending_activations (NMManager *self)
+@@ -835,6 +835,10 @@ recheck_pending_activations (NMManager *self)
  
  	object_manager = _nm_object_get_dbus_object_manager (NM_OBJECT (self));
  
