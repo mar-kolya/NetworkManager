@@ -15,11 +15,11 @@ WirelessEnabled state if urfkill support is enabled.
  create mode 100644 src/nm-urfkill-manager.c
  create mode 100644 src/nm-urfkill-manager.h
 
-diff --git a/Makefile.am b/Makefile.am
-index 7e1e26f..bdab8cd 100644
---- a/Makefile.am
-+++ b/Makefile.am
-@@ -1330,6 +1330,13 @@ src_libNetworkManagerBase_la_SOURCES += \
+Index: NetworkManager/Makefile.am
+===================================================================
+--- NetworkManager.orig/Makefile.am
++++ NetworkManager/Makefile.am
+@@ -1343,6 +1343,13 @@ src_libNetworkManagerBase_la_SOURCES +=
  	src/platform/wifi/wifi-utils-wext.h
  endif
  
@@ -33,25 +33,11 @@ index 7e1e26f..bdab8cd 100644
  src_libNetworkManagerBase_la_LIBADD = \
  	libnm-core/libnm-core.la \
  	introspection/libnmdbus.la \
-diff --git a/config.h.in b/config.h.in
-index ff4567e..843eb1f 100644
---- a/config.h.in
-+++ b/config.h.in
-@@ -304,6 +304,9 @@
- /* Define if you have Teamd control support */
- #undef WITH_TEAMDCTL
- 
-++/* Define if you want to build with support for the urfkill daemon */
-++#undef WITH_URFKILL
-+
- /* Define if you have Wi-Fi support */
- #undef WITH_WIFI
- 
-diff --git a/configure.ac b/configure.ac
-index 9706573..14132c3 100644
---- a/configure.ac
-+++ b/configure.ac
-@@ -274,6 +274,18 @@ else
+Index: NetworkManager/configure.ac
+===================================================================
+--- NetworkManager.orig/configure.ac
++++ NetworkManager/configure.ac
+@@ -285,6 +285,18 @@ else
  	AC_DEFINE(HAVE_VLAN_FLAG_LOOSE_BINDING, 0, [Define if you have VLAN_FLAG_LOOSE_BINDING])
  fi
  
@@ -70,19 +56,19 @@ index 9706573..14132c3 100644
  dnl
  dnl Checks for libdl - on certain platforms its part of libc
  dnl
-diff --git a/src/nm-manager.c b/src/nm-manager.c
-index 072f4cd..70e1996 100644
---- a/src/nm-manager.c
-+++ b/src/nm-manager.c
-@@ -36,6 +36,7 @@
- #include "devices/nm-device-generic.h"
- #include "platform/nm-platform.h"
+Index: NetworkManager/src/nm-manager.c
+===================================================================
+--- NetworkManager.orig/src/nm-manager.c
++++ NetworkManager/src/nm-manager.c
+@@ -38,6 +38,7 @@
+ #include "platform/nmp-object.h"
+ #include "nm-hostname-manager.h"
  #include "nm-rfkill-manager.h"
 +#include "nm-urfkill-manager.h"
  #include "dhcp/nm-dhcp-manager.h"
  #include "settings/nm-settings.h"
  #include "settings/nm-settings-connection.h"
-@@ -130,6 +131,9 @@ typedef struct {
+@@ -134,6 +135,9 @@ typedef struct {
  		guint            id;
  	} prop_filter;
  	NMRfkillManager *rfkill_mgr;
@@ -92,7 +78,7 @@ index 072f4cd..70e1996 100644
  
  	NMCheckpointManager *checkpoint_mgr;
  
-@@ -155,6 +159,7 @@ typedef struct {
+@@ -158,6 +162,7 @@ typedef struct {
  	gboolean ifstate_force_online;
  
  	guint timestamp_update_id;
@@ -100,7 +86,7 @@ index 072f4cd..70e1996 100644
  
  	guint devices_inited_id;
  
-@@ -6121,6 +6126,49 @@ nm_manager_set_capability (NMManager *self,
+@@ -6129,6 +6134,49 @@ nm_manager_set_capability (NMManager *se
  
  /*****************************************************************************/
  
@@ -150,7 +136,7 @@ index 072f4cd..70e1996 100644
  NM_DEFINE_SINGLETON_REGISTER (NMManager);
  
  NMManager *
-@@ -6138,6 +6186,43 @@ nm_settings_get (void)
+@@ -6146,6 +6194,43 @@ nm_settings_get (void)
  	return NM_MANAGER_GET_PRIVATE (singleton_instance)->settings;
  }
  
@@ -194,7 +180,7 @@ index 072f4cd..70e1996 100644
  NMManager *
  nm_manager_setup (void)
  {
-@@ -6217,13 +6302,35 @@ constructed (GObject *object)
+@@ -6228,13 +6313,35 @@ constructed (GObject *object)
  	                  G_CALLBACK (rfkill_manager_rfkill_changed_cb),
  	                  self);
  
@@ -232,11 +218,10 @@ index 072f4cd..70e1996 100644
  }
  
  static void
-diff --git a/src/nm-urfkill-manager.c b/src/nm-urfkill-manager.c
-new file mode 100644
-index 0000000..5698cd8
+Index: NetworkManager/src/nm-urfkill-manager.c
+===================================================================
 --- /dev/null
-+++ b/src/nm-urfkill-manager.c
++++ NetworkManager/src/nm-urfkill-manager.c
 @@ -0,0 +1,290 @@
 +/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
 +/* NetworkManager -- Network link manager
@@ -528,11 +513,10 @@ index 0000000..5698cd8
 +			      NULL, NULL, g_cclosure_marshal_VOID__BOOLEAN,
 +			      G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 +}
-diff --git a/src/nm-urfkill-manager.h b/src/nm-urfkill-manager.h
-new file mode 100644
-index 0000000..7b872f7
+Index: NetworkManager/src/nm-urfkill-manager.h
+===================================================================
 --- /dev/null
-+++ b/src/nm-urfkill-manager.h
++++ NetworkManager/src/nm-urfkill-manager.h
 @@ -0,0 +1,49 @@
 +/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
 +/* NetworkManager -- Network link manager

@@ -7,15 +7,15 @@ which tends to fail on ppc64el and arm64
  Makefile.am | 1 -
  1 file changed, 1 deletion(-)
 
-diff --git a/Makefile.am b/Makefile.am
-index bdab8cd..640ea3e 100644
---- a/Makefile.am
-+++ b/Makefile.am
-@@ -2944,7 +2944,6 @@ src_tests_ldadd = \
+Index: NetworkManager/Makefile.am
+===================================================================
+--- NetworkManager.orig/Makefile.am
++++ NetworkManager/Makefile.am
+@@ -2962,7 +2962,6 @@ src_tests_ldadd = \
  
  check_programs += \
  	src/tests/test-general \
 -	src/tests/test-general-with-expect \
  	src/tests/test-ip4-config \
  	src/tests/test-ip6-config \
- 	src/tests/test-route-manager-linux \
+ 	src/tests/test-dcb \

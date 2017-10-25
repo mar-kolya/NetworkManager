@@ -10,11 +10,11 @@ See also: https://blueprints.launchpad.net/ubuntu/+spec/foundations-p-dns-resolv
  src/dns/nm-dns-manager.c | 6 +++---
  2 files changed, 5 insertions(+), 5 deletions(-)
 
-diff --git a/src/dns/nm-dns-dnsmasq.c b/src/dns/nm-dns-dnsmasq.c
-index a6204ae..ba62f6a 100644
---- a/src/dns/nm-dns-dnsmasq.c
-+++ b/src/dns/nm-dns-dnsmasq.c
-@@ -508,8 +508,8 @@ start_dnsmasq (NMDnsDnsmasq *self)
+Index: NetworkManager/src/dns/nm-dns-dnsmasq.c
+===================================================================
+--- NetworkManager.orig/src/dns/nm-dns-dnsmasq.c
++++ NetworkManager/src/dns/nm-dns-dnsmasq.c
+@@ -500,8 +500,8 @@ start_dnsmasq (NMDnsDnsmasq *self)
  	argv[idx++] = "--no-hosts"; /* don't use /etc/hosts to resolve */
  	argv[idx++] = "--bind-interfaces";
  	argv[idx++] = "--pid-file=" PIDFILE;
@@ -25,10 +25,10 @@ index a6204ae..ba62f6a 100644
  	argv[idx++] = "--clear-on-reload"; /* clear cache when dns server changes */
  	argv[idx++] = "--conf-file=/dev/null"; /* avoid loading /etc/dnsmasq.conf */
  	argv[idx++] = "--proxy-dnssec"; /* Allow DNSSEC to pass through */
-diff --git a/src/dns/nm-dns-manager.c b/src/dns/nm-dns-manager.c
-index f443f34..85a0e19 100644
---- a/src/dns/nm-dns-manager.c
-+++ b/src/dns/nm-dns-manager.c
+Index: NetworkManager/src/dns/nm-dns-manager.c
+===================================================================
+--- NetworkManager.orig/src/dns/nm-dns-manager.c
++++ NetworkManager/src/dns/nm-dns-manager.c
 @@ -1162,14 +1162,14 @@ update_dns (NMDnsManager *self,
  		;
  	}
@@ -46,7 +46,7 @@ index f443f34..85a0e19 100644
  	}
  
  	if (update) {
-@@ -1548,7 +1548,7 @@ nm_dns_manager_stop (NMDnsManager *self)
+@@ -1549,7 +1549,7 @@ nm_dns_manager_stop (NMDnsManager *self)
  	_LOGT ("stopping...");
  
  	/* If we're quitting, leave a valid resolv.conf in place, not one

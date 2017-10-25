@@ -8,11 +8,11 @@ Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/network-manager/+bug/15927
  src/dns/nm-dns-manager.c | 36 ++++++++++++++++++++----------------
  1 file changed, 20 insertions(+), 16 deletions(-)
 
-Index: b/src/dns/nm-dns-manager.c
+Index: NetworkManager/src/dns/nm-dns-manager.c
 ===================================================================
---- a/src/dns/nm-dns-manager.c
-+++ b/src/dns/nm-dns-manager.c
-@@ -295,7 +295,7 @@
+--- NetworkManager.orig/src/dns/nm-dns-manager.c
++++ NetworkManager/src/dns/nm-dns-manager.c
+@@ -295,7 +295,7 @@ add_dns_option_item (GPtrArray *array, c
  }
  
  static void
@@ -21,7 +21,7 @@ Index: b/src/dns/nm-dns-manager.c
  {
  	guint32 num, num_domains, num_searches, i;
  
-@@ -308,13 +308,14 @@
+@@ -308,13 +308,14 @@ merge_one_ip4_config (NMResolvConfData *
  	num_domains = nm_ip4_config_get_num_domains (src);
  	num_searches = nm_ip4_config_get_num_searches (src);
  
@@ -43,7 +43,7 @@ Index: b/src/dns/nm-dns-manager.c
  	}
  
  	if (num_domains > 1 || !num_searches) {
-@@ -351,7 +352,7 @@
+@@ -351,7 +352,7 @@ merge_one_ip4_config (NMResolvConfData *
  }
  
  static void
@@ -52,7 +52,7 @@ Index: b/src/dns/nm-dns-manager.c
  {
  	guint32 num, num_domains, num_searches, i;
  
-@@ -378,13 +379,14 @@
+@@ -378,13 +379,14 @@ merge_one_ip6_config (NMResolvConfData *
  	num_domains = nm_ip6_config_get_num_domains (src);
  	num_searches = nm_ip6_config_get_num_searches (src);
  
@@ -74,7 +74,7 @@ Index: b/src/dns/nm-dns-manager.c
  	}
  
  	if (num_domains > 1 || !num_searches) {
-@@ -412,9 +414,9 @@
+@@ -412,9 +414,9 @@ merge_one_ip_config_data (NMResolvConfDa
                            NMDnsIPConfigData *data)
  {
  	if (NM_IS_IP4_CONFIG (data->config))

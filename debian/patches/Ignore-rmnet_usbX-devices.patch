@@ -6,11 +6,11 @@ Subject: Ignore rmnet_usbX devices.
  src/nm-manager.c | 6 ++++++
  1 file changed, 6 insertions(+)
 
-diff --git a/src/nm-manager.c b/src/nm-manager.c
-index 413ec0b..294221e 100644
---- a/src/nm-manager.c
-+++ b/src/nm-manager.c
-@@ -2397,6 +2397,12 @@ platform_link_added (NMManager *self,
+Index: NetworkManager/src/nm-manager.c
+===================================================================
+--- NetworkManager.orig/src/nm-manager.c
++++ NetworkManager/src/nm-manager.c
+@@ -2401,6 +2401,12 @@ platform_link_added (NMManager *self,
  		}
  	}
  

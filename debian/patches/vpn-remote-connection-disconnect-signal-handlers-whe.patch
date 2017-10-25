@@ -38,11 +38,11 @@ Applied-Upstream: 1.8.5
  libnm/nm-vpn-connection.c    | 4 ++--
  2 files changed, 5 insertions(+), 5 deletions(-)
 
-diff --git a/libnm/nm-remote-connection.c b/libnm/nm-remote-connection.c
-index 0f7ea58ef..5cd42555f 100644
---- a/libnm/nm-remote-connection.c
-+++ b/libnm/nm-remote-connection.c
-@@ -641,7 +641,7 @@ init_sync (GInitable *initable, GCancellable *cancellable, GError **error)
+Index: NetworkManager/libnm/nm-remote-connection.c
+===================================================================
+--- NetworkManager.orig/libnm/nm-remote-connection.c
++++ NetworkManager/libnm/nm-remote-connection.c
+@@ -641,7 +641,7 @@ init_sync (GInitable *initable, GCancell
  	GVariant *settings;
  
  	priv->proxy = NMDBUS_SETTINGS_CONNECTION (_nm_object_get_proxy (NM_OBJECT (initable), NM_DBUS_INTERFACE_SETTINGS_CONNECTION));
@@ -51,7 +51,7 @@ index 0f7ea58ef..5cd42555f 100644
  
  	if (nmdbus_settings_connection_call_get_settings_sync (priv->proxy,
  	                                                       &settings,
-@@ -730,8 +730,8 @@ init_async (GAsyncInitable *initable, int io_priority,
+@@ -730,8 +730,8 @@ init_async (GAsyncInitable *initable, in
  	priv->proxy = NMDBUS_SETTINGS_CONNECTION (_nm_object_get_proxy (NM_OBJECT (initable),
  	                                          NM_DBUS_INTERFACE_SETTINGS_CONNECTION));
  
@@ -62,10 +62,10 @@ index 0f7ea58ef..5cd42555f 100644
  
  	nmdbus_settings_connection_call_get_settings (NM_REMOTE_CONNECTION_GET_PRIVATE (init_data->initable)->proxy,
  	                                              init_data->cancellable,
-diff --git a/libnm/nm-vpn-connection.c b/libnm/nm-vpn-connection.c
-index 814f45f0f..636c39507 100644
---- a/libnm/nm-vpn-connection.c
-+++ b/libnm/nm-vpn-connection.c
+Index: NetworkManager/libnm/nm-vpn-connection.c
+===================================================================
+--- NetworkManager.orig/libnm/nm-vpn-connection.c
++++ NetworkManager/libnm/nm-vpn-connection.c
 @@ -144,8 +144,8 @@ init_dbus (NMObject *object)
  	                                property_info);
  
@@ -77,6 +77,3 @@ index 814f45f0f..636c39507 100644
  	g_object_unref (proxy);
  }
  
--- 
-2.14.1
-

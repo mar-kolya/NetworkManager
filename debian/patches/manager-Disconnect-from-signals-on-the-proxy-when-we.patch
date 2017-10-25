@@ -18,11 +18,11 @@ Applied-Upstream: 1.8.5
  libnm/nm-manager.c | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
 
-diff --git a/libnm/nm-manager.c b/libnm/nm-manager.c
-index d3df73375..294b9de18 100644
---- a/libnm/nm-manager.c
-+++ b/libnm/nm-manager.c
-@@ -192,8 +192,8 @@ init_dbus (NMObject *object)
+Index: NetworkManager/libnm/nm-manager.c
+===================================================================
+--- NetworkManager.orig/libnm/nm-manager.c
++++ NetworkManager/libnm/nm-manager.c
+@@ -202,8 +202,8 @@ init_dbus (NMObject *object)
  	                                property_info);
  
  	/* Permissions */
@@ -33,6 +33,3 @@ index d3df73375..294b9de18 100644
  }
  
  static NMClientPermission
--- 
-2.14.1
-
