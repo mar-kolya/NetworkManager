@@ -1,0 +1,28 @@
+From 13f955db58bd60a7f5a8e5600c7de62ee9a4c876 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 21 Aug 2017 12:18:13 +0200
+Subject: config: write connectivity=true to internal state file
+
+The internal state file is supposed to overwrite the files from /etc.
+Hence, we must also explicitly enable connectivity checking, when the
+user wishes to do so. Otherwise, if /etc contains connectivity=false,
+the setting cannot be overruled via D-Bus.
+
+diff --git a/src/nm-config.c b/src/nm-config.c
+index 3faea15..de727c9 100644
+--- a/src/nm-config.c
++++ b/src/nm-config.c
+@@ -1608,10 +1608,8 @@ void nm_config_set_connectivity_check_enabled (NMConfig *self,
+ 	/* Remove existing groups */
+ 	g_key_file_remove_group (keyfile, NM_CONFIG_KEYFILE_GROUP_CONNECTIVITY, NULL);
+ 
+-	if (!enabled) {
+-		g_key_file_set_value (keyfile, NM_CONFIG_KEYFILE_GROUP_CONNECTIVITY,
+-		                      "enabled", "false");
+-	}
++	g_key_file_set_value (keyfile, NM_CONFIG_KEYFILE_GROUP_CONNECTIVITY,
++	                      "enabled", enabled ? "true" : "false");
+ 
+ 	nm_config_set_values (self, keyfile, TRUE, FALSE);
+ 	g_key_file_unref (keyfile);
+
