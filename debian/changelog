@@ -1,12 +1,15 @@
-network-manager (1.9.2-dev-1kolya2~1.gbpa1d85f) UNRELEASED; urgency=medium
+network-manager (1.9.3-dev-1kolya1~1.gbpa94703) UNRELEASED; urgency=medium
 
-  ** SNAPSHOT build @a1d85f75a4c6521719b10fd7a9fec768706c051f **
+  ** SNAPSHOT build @a94703a019b66507a1d39d569f7b3f9381c047fe **
 
   * Add dbp.conf
   * refresh patches
   * Rediff patches
+  * Update changelog for 1.9.2-dev-1kolya2~1.gbpa1d85f release
+  * Rediff patches
+  * Rediff patches
 
- -- Nikolay Martynov <mar.kolya@gmail.com>  Tue, 24 Oct 2017 23:22:55 -0400
+ -- Nikolay Martynov <mar.kolya@gmail.com>  Sun, 29 Oct 2017 17:52:11 -0400
 
 network-manager (1.8.4-1ubuntu3) artful; urgency=medium
 
