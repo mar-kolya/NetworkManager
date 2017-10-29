@@ -497,7 +497,7 @@ dispatch_netconfig (NMDnsManager *self,
 		g_free (str);
 	}
 
-	close (fd);
+	nm_close (fd);
 
 	/* Wait until the process exits */
 	if (!nm_utils_kill_child_sync (pid, 0, LOGD_DNS, "netconfig", &status, 1000, 0)) {
@@ -1167,9 +1167,16 @@ update_dns (NMDnsManager *self,
 	 * but only uses the local caching nameserver.
 	 */
 	if (caching) {
+		const char *lladdr = "127.0.0.1";
+
+		if (NM_IS_DNS_SYSTEMD_RESOLVED (priv->plugin)) {
+			/* systemd-resolved uses a different link-local address */
+			lladdr = "127.0.0.53";
+		}
+
 		g_strfreev (nameservers);
-		nameservers = g_new0 (char*, 2);
-		nameservers[0] = g_strdup ("127.0.0.1");
+		nameservers = g_new0 (char *, 2);
+		nameservers[0] = g_strdup (lladdr);
 	}
 
 	if (update) {
@@ -1626,7 +1633,7 @@ _check_resconf_immutable (NMDnsManagerResolvConfManager rc_manager)
 		if (fd != -1) {
 			if (ioctl (fd, FS_IOC_GETFLAGS, &flags) != -1)
 				immutable = NM_FLAGS_HAS (flags, FS_IMMUTABLE_FL);
-			close (fd);
+			nm_close (fd);
 		}
 		return immutable ? NM_DNS_MANAGER_RESOLV_CONF_MAN_IMMUTABLE : rc_manager;
 	}

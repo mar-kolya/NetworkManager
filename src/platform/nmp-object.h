@@ -115,7 +115,7 @@ typedef struct {
 	/* Only for NMPObjectLnk* types. */
 	NMLinkType lnk_link_type;
 
-	guint (*cmd_obj_hash) (const NMPObject *obj);
+	void (*cmd_obj_hash_update) (const NMPObject *obj, NMHashState *h);
 	int (*cmd_obj_cmp) (const NMPObject *obj1, const NMPObject *obj2);
 	void (*cmd_obj_copy) (NMPObject *dst, const NMPObject *src);
 	void (*cmd_obj_dispose) (NMPObject *obj);
@@ -126,10 +126,10 @@ typedef struct {
 	/* functions that operate on NMPlatformObject */
 	void (*cmd_plobj_id_copy) (NMPlatformObject *dst, const NMPlatformObject *src);
 	int (*cmd_plobj_id_cmp) (const NMPlatformObject *obj1, const NMPlatformObject *obj2);
-	guint (*cmd_plobj_id_hash) (const NMPlatformObject *obj);
+	void (*cmd_plobj_id_hash_update) (const NMPlatformObject *obj, NMHashState *h);
 	const char *(*cmd_plobj_to_string_id) (const NMPlatformObject *obj, char *buf, gsize buf_size);
 	const char *(*cmd_plobj_to_string) (const NMPlatformObject *obj, char *buf, gsize len);
-	guint (*cmd_plobj_hash) (const NMPlatformObject *obj);
+	void (*cmd_plobj_hash_update) (const NMPlatformObject *obj, NMHashState *h);
 	int (*cmd_plobj_cmp) (const NMPlatformObject *obj1, const NMPlatformObject *obj2);
 } NMPClass;
 
@@ -435,6 +435,21 @@ nmp_object_unref (const NMPObject *obj)
 	return NULL;
 }
 
+#define nm_clear_nmp_object(ptr) \
+	({ \
+		typeof (ptr) _ptr = (ptr); \
+		typeof (*_ptr) _pptr; \
+		gboolean _changed = FALSE; \
+		\
+		if (   _ptr \
+		    && (_pptr = *_ptr)) { \
+			*_ptr = NULL; \
+			nmp_object_unref (_pptr); \
+			_changed = TRUE; \
+		} \
+		_changed; \
+	})
+
 NMPObject *nmp_object_new (NMPObjectType obj_type, const NMPlatformObject *plob);
 NMPObject *nmp_object_new_link (int ifindex);
 
@@ -454,13 +469,14 @@ const NMPObject *nmp_object_stackinit_id_ip4_address (NMPObject *obj, int ifinde
 const NMPObject *nmp_object_stackinit_id_ip6_address (NMPObject *obj, int ifindex, const struct in6_addr *address);
 
 const char *nmp_object_to_string (const NMPObject *obj, NMPObjectToStringMode to_string_mode, char *buf, gsize buf_size);
-guint nmp_object_hash (const NMPObject *obj);
+void nmp_object_hash_update (const NMPObject *obj, NMHashState *h);
 int nmp_object_cmp (const NMPObject *obj1, const NMPObject *obj2);
 gboolean nmp_object_equal (const NMPObject *obj1, const NMPObject *obj2);
 void nmp_object_copy (NMPObject *dst, const NMPObject *src, gboolean id_only);
 NMPObject *nmp_object_clone (const NMPObject *obj, gboolean id_only);
 
 int nmp_object_id_cmp (const NMPObject *obj1, const NMPObject *obj2);
+void nmp_object_id_hash_update (const NMPObject *obj, NMHashState *h);
 guint nmp_object_id_hash (const NMPObject *obj);
 
 static inline gboolean
@@ -474,12 +490,12 @@ gboolean nmp_object_is_visible (const NMPObject *obj);
 
 void _nmp_object_fixup_link_udev_fields (NMPObject **obj_new, NMPObject *obj_orig, gboolean use_udev);
 
-#define nm_auto_nmpobj __attribute__((cleanup(_nm_auto_nmpobj_cleanup)))
 static inline void
 _nm_auto_nmpobj_cleanup (gpointer p)
 {
 	nmp_object_unref (*((const NMPObject **) p));
 }
+#define nm_auto_nmpobj nm_auto(_nm_auto_nmpobj_cleanup)
 
 typedef struct _NMPCache NMPCache;
 
@@ -549,10 +565,9 @@ nmp_cache_iter_next (NMDedupMultiIter *iter, const NMPObject **out_obj)
 	gboolean has_next;
 
 	has_next = nm_dedup_multi_iter_next (iter);
-	if (has_next) {
-		nm_assert (NMP_OBJECT_IS_VALID (iter->current->obj));
-		NM_SET_OUT (out_obj, iter->current->obj);
-	}
+	nm_assert (!has_next || NMP_OBJECT_IS_VALID (iter->current->obj));
+	if (out_obj)
+		*out_obj = has_next ? iter->current->obj : NULL;
 	return has_next;
 }
 
@@ -562,10 +577,9 @@ nmp_cache_iter_next_link (NMDedupMultiIter *iter, const NMPlatformLink **out_obj
 	gboolean has_next;
 
 	has_next = nm_dedup_multi_iter_next (iter);
-	if (has_next) {
-		nm_assert (NMP_OBJECT_GET_TYPE (iter->current->obj) == NMP_OBJECT_TYPE_LINK);
-		NM_SET_OUT (out_obj, &(((const NMPObject *) iter->current->obj)->link));
-	}
+	nm_assert (!has_next || NMP_OBJECT_GET_TYPE (iter->current->obj) == NMP_OBJECT_TYPE_LINK);
+	if (out_obj)
+		*out_obj = has_next ? &(((const NMPObject *) iter->current->obj)->link) : NULL;
 	return has_next;
 }
 

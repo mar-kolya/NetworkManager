@@ -1647,7 +1647,7 @@ nm_setting_connection_class_init (NMSettingConnectionClass *setting_class)
 	 *
 	 * The number of times a connection should be tried when autoactivating before
 	 * giving up. Zero means forever, -1 means the global default (4 times if not
-	 * overridden).
+	 * overridden). Setting this to 1 means to try activation once and never retry.
 	 */
 	/* ---ifcfg-rh---
 	 * property: autoconnect-retries
@@ -1796,7 +1796,7 @@ nm_setting_connection_class_init (NMSettingConnectionClass *setting_class)
 	 **/
 	/* ---ifcfg-rh---
 	 * property: autoconnect-slaves
-	 * variable: AUTOCONNECT-SLAVES(+)
+	 * variable: AUTOCONNECT_SLAVES(+)
 	 * default: missing variable means global default
 	 * description: Whether slaves of this connection should be auto-connected
 	 *   when this connection is activated.

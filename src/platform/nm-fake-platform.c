@@ -585,7 +585,7 @@ link_set_address (NMPlatform *platform, int ifindex, gconstpointer addr, size_t 
 	return NM_PLATFORM_ERROR_SUCCESS;
 }
 
-static gboolean
+static NMPlatformError
 link_set_mtu (NMPlatform *platform, int ifindex, guint32 mtu)
 {
 	NMFakePlatformLink *device = link_get (platform, ifindex);
@@ -593,13 +593,13 @@ link_set_mtu (NMPlatform *platform, int ifindex, guint32 mtu)
 
 	if (!device) {
 		_LOGE ("failure changing link: netlink error (No such device)");
-		return FALSE;
+		return NM_PLATFORM_ERROR_EXISTS;
 	}
 
 	obj_tmp = nmp_object_clone (device->obj, FALSE);
 	obj_tmp->link.mtu = mtu;
 	link_set_obj (platform, device, obj_tmp);
-	return TRUE;
+	return NM_PLATFORM_ERROR_SUCCESS;
 }
 
 static gboolean
@@ -1071,7 +1071,7 @@ ipx_address_delete (NMPlatform *platform,
 			    || (addr && address->address != *((guint32 *) addr))
 			    || (plen && address->plen != *plen)
 			    || (   peer_addr
-			        && (((peer_addr_i ^ address->peer_address) & nm_utils_ip4_prefix_to_netmask (address->plen)) != 0)))
+			        && (((peer_addr_i ^ address->peer_address) & _nm_utils_ip4_prefix_to_netmask (address->plen)) != 0)))
 				continue;
 		} else {
 			const NMPlatformIP6Address *address = NMP_OBJECT_CAST_IP6_ADDRESS (o);
@@ -1358,7 +1358,7 @@ nm_fake_platform_init (NMFakePlatform *fake_platform)
 {
 	NMFakePlatformPrivate *priv = NM_FAKE_PLATFORM_GET_PRIVATE (fake_platform);
 
-	priv->options = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+	priv->options = g_hash_table_new_full (nm_str_hash, g_str_equal, g_free, g_free);
 	priv->links = g_array_new (TRUE, TRUE, sizeof (NMFakePlatformLink));
 }
 

@@ -198,6 +198,16 @@ GHashTable *_nm_utils_copy_strdict (GHashTable *strdict);
 
 typedef gpointer (*NMUtilsCopyFunc) (gpointer);
 
+gboolean _nm_ip_route_attribute_validate_all (const NMIPRoute *route);
+
+static inline void
+_nm_auto_ip_route_unref (NMIPRoute **v)
+{
+	if (*v)
+		nm_ip_route_unref (*v);
+}
+#define nm_auto_ip_route_unref nm_auto (_nm_auto_ip_route_unref)
+
 GPtrArray *_nm_utils_copy_slist_to_array (const GSList *list,
                                           NMUtilsCopyFunc copy_func,
                                           GDestroyNotify unref_func);
@@ -326,7 +336,7 @@ extern const NMUtilsDNSOptionDesc _nm_utils_dns_option_descs[];
 gboolean    _nm_utils_dns_option_validate (const char *option, char **out_name,
                                            long *out_value, gboolean ipv6,
                                            const NMUtilsDNSOptionDesc *option_descs);
-int         _nm_utils_dns_option_find_idx (GPtrArray *array, const char *option);
+gssize      _nm_utils_dns_option_find_idx (GPtrArray *array, const char *option);
 
 /*****************************************************************************/
 
@@ -418,6 +428,18 @@ gboolean _nm_utils_inet6_is_token (const struct in6_addr *in6addr);
 /*****************************************************************************/
 
 gboolean    _nm_utils_team_config_equal (const char *conf1, const char *conf2, gboolean port);
+
+/*****************************************************************************/
+
+static inline int
+nm_setting_ip_config_get_addr_family (NMSettingIPConfig *s_ip)
+{
+	if (NM_IS_SETTING_IP4_CONFIG (s_ip))
+		return AF_INET;
+	if (NM_IS_SETTING_IP6_CONFIG (s_ip))
+		return AF_INET6;
+	g_return_val_if_reached (AF_UNSPEC);
+}
 
 /*****************************************************************************/
 

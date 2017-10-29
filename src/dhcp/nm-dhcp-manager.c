@@ -39,8 +39,6 @@
 #include "nm-config.h"
 #include "NetworkManagerUtils.h"
 
-#define DHCP_TIMEOUT 45 /* default DHCP timeout, in seconds */
-
 /*****************************************************************************/
 
 typedef struct {
@@ -97,7 +95,7 @@ _client_factory_available (const NMDhcpClientFactory *client_factory)
 /*****************************************************************************/
 
 static NMDhcpClient *
-get_client_for_ifindex (NMDhcpManager *manager, int ifindex, gboolean ip6)
+get_client_for_ifindex (NMDhcpManager *manager, int addr_family, int ifindex)
 {
 	NMDhcpManagerPrivate *priv;
 	GHashTableIter iter;
@@ -113,7 +111,7 @@ get_client_for_ifindex (NMDhcpManager *manager, int ifindex, gboolean ip6)
 		NMDhcpClient *candidate = NM_DHCP_CLIENT (value);
 
 		if (   nm_dhcp_client_get_ifindex (candidate) == ifindex
-		    && nm_dhcp_client_get_ipv6 (candidate) == ip6)
+		    && nm_dhcp_client_get_addr_family (candidate) == addr_family)
 			return candidate;
 	}
 
@@ -154,13 +152,14 @@ client_state_changed (NMDhcpClient *client,
 
 static NMDhcpClient *
 client_start (NMDhcpManager *self,
+              int addr_family,
               NMDedupMultiIndex *multi_idx,
               const char *iface,
               int ifindex,
               const GByteArray *hwaddr,
               const char *uuid,
-              guint32 priority,
-              gboolean ipv6,
+              guint32 route_table,
+              guint32 route_metric,
               const struct in6_addr *ipv6_ll_addr,
               const char *dhcp_client_id,
               guint32 timeout,
@@ -188,7 +187,7 @@ client_start (NMDhcpManager *self,
 		return NULL;
 
 	/* Kill any old client instance */
-	client = get_client_for_ifindex (self, ifindex, ipv6);
+	client = get_client_for_ifindex (self, addr_family, ifindex);
 	if (client) {
 		g_object_ref (client);
 		remove_client (self, client);
@@ -199,21 +198,22 @@ client_start (NMDhcpManager *self,
 	/* And make a new one */
 	client = g_object_new (priv->client_factory->get_type (),
 	                       NM_DHCP_CLIENT_MULTI_IDX, multi_idx,
+	                       NM_DHCP_CLIENT_ADDR_FAMILY, addr_family,
 	                       NM_DHCP_CLIENT_INTERFACE, iface,
 	                       NM_DHCP_CLIENT_IFINDEX, ifindex,
 	                       NM_DHCP_CLIENT_HWADDR, hwaddr,
-	                       NM_DHCP_CLIENT_IPV6, ipv6,
 	                       NM_DHCP_CLIENT_UUID, uuid,
-	                       NM_DHCP_CLIENT_PRIORITY, priority,
-	                       NM_DHCP_CLIENT_TIMEOUT, timeout ? timeout : DHCP_TIMEOUT,
+	                       NM_DHCP_CLIENT_ROUTE_TABLE, (guint) route_table,
+	                       NM_DHCP_CLIENT_ROUTE_METRIC, (guint) route_metric,
+	                       NM_DHCP_CLIENT_TIMEOUT, (guint) timeout,
 	                       NULL);
 	g_hash_table_insert (NM_DHCP_MANAGER_GET_PRIVATE (self)->clients, client, g_object_ref (client));
 	g_signal_connect (client, NM_DHCP_CLIENT_SIGNAL_STATE_CHANGED, G_CALLBACK (client_state_changed), self);
 
-	if (ipv6)
-		success = nm_dhcp_client_start_ip6 (client, dhcp_anycast_addr, ipv6_ll_addr, hostname, info_only, privacy, needed_prefixes);
-	else
+	if (addr_family == AF_INET)
 		success = nm_dhcp_client_start_ip4 (client, dhcp_client_id, dhcp_anycast_addr, hostname, hostname_use_fqdn, last_ip4_address);
+	else
+		success = nm_dhcp_client_start_ip6 (client, dhcp_anycast_addr, ipv6_ll_addr, hostname, info_only, privacy, needed_prefixes);
 
 	if (!success) {
 		remove_client (self, client);
@@ -231,7 +231,8 @@ nm_dhcp_manager_start_ip4 (NMDhcpManager *self,
                            int ifindex,
                            const GByteArray *hwaddr,
                            const char *uuid,
-                           guint32 priority,
+                           guint32 route_table,
+                           guint32 route_metric,
                            gboolean send_hostname,
                            const char *dhcp_hostname,
                            const char *dhcp_fqdn,
@@ -272,7 +273,8 @@ nm_dhcp_manager_start_ip4 (NMDhcpManager *self,
 		}
 	}
 
-	return client_start (self, multi_idx, iface, ifindex, hwaddr, uuid, priority, FALSE, NULL,
+	return client_start (self, AF_INET, multi_idx, iface, ifindex, hwaddr, uuid,
+	                     route_table, route_metric, NULL,
 	                     dhcp_client_id, timeout, dhcp_anycast_addr, hostname,
 	                     use_fqdn, FALSE, 0, last_ip_address, 0);
 }
@@ -286,7 +288,8 @@ nm_dhcp_manager_start_ip6 (NMDhcpManager *self,
                            const GByteArray *hwaddr,
                            const struct in6_addr *ll_addr,
                            const char *uuid,
-                           guint32 priority,
+                           guint32 route_table,
+                           guint32 route_metric,
                            gboolean send_hostname,
                            const char *dhcp_hostname,
                            guint32 timeout,
@@ -305,8 +308,9 @@ nm_dhcp_manager_start_ip6 (NMDhcpManager *self,
 		/* Always prefer the explicit dhcp-hostname if given */
 		hostname = dhcp_hostname ? dhcp_hostname : priv->default_hostname;
 	}
-	return client_start (self, multi_idx, iface, ifindex, hwaddr, uuid, priority, TRUE,
-	                     ll_addr, NULL, timeout, dhcp_anycast_addr, hostname, TRUE, info_only,
+	return client_start (self, AF_INET6, multi_idx, iface, ifindex, hwaddr, uuid,
+	                     route_table, route_metric, ll_addr,
+	                     NULL, timeout, dhcp_anycast_addr, hostname, TRUE, info_only,
 	                     privacy, NULL, needed_prefixes);
 }
 
@@ -327,11 +331,12 @@ nm_dhcp_manager_set_default_hostname (NMDhcpManager *manager, const char *hostna
 GSList *
 nm_dhcp_manager_get_lease_ip_configs (NMDhcpManager *self,
                                       NMDedupMultiIndex *multi_idx,
+                                      int addr_family,
                                       const char *iface,
                                       int ifindex,
                                       const char *uuid,
-                                      gboolean ipv6,
-                                      guint32 default_route_metric)
+                                      guint32 route_table,
+                                      guint32 route_metric)
 {
 	NMDhcpManagerPrivate *priv;
 
@@ -339,11 +344,12 @@ nm_dhcp_manager_get_lease_ip_configs (NMDhcpManager *self,
 	g_return_val_if_fail (iface != NULL, NULL);
 	g_return_val_if_fail (ifindex >= -1, NULL);
 	g_return_val_if_fail (uuid != NULL, NULL);
+	g_return_val_if_fail (NM_IN_SET (addr_family, AF_INET, AF_INET6), NULL);
 
 	priv = NM_DHCP_MANAGER_GET_PRIVATE (self);
 	if (   priv->client_factory
 	    && priv->client_factory->get_lease_ip_configs)
-		return priv->client_factory->get_lease_ip_configs (multi_idx, iface, ifindex, uuid, ipv6, default_route_metric);
+		return priv->client_factory->get_lease_ip_configs (multi_idx, addr_family, iface, ifindex, uuid, route_table, route_metric);
 	return NULL;
 }
 

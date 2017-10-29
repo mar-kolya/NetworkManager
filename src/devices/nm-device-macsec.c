@@ -488,7 +488,6 @@ handle_auth_or_fail (NMDeviceMacsec *self,
 	tries_left = nm_settings_connection_get_autoconnect_retries (settings_connection);
 	if (tries_left == 0)
 		return NM_ACT_STAGE_RETURN_FAILURE;
-
 	if (tries_left > 0)
 		nm_settings_connection_set_autoconnect_retries (settings_connection, tries_left - 1);
 
@@ -692,7 +691,7 @@ create_and_realize (NMDevice *device,
 	g_assert (s_macsec);
 
 	if (!parent) {
-		g_set_error (error, NM_DEVICE_ERROR, NM_DEVICE_ERROR_FAILED,
+		g_set_error (error, NM_DEVICE_ERROR, NM_DEVICE_ERROR_MISSING_DEPENDENCIES,
 		             "MACsec devices can not be created without a parent interface");
 		return FALSE;
 	}

@@ -294,7 +294,7 @@ nm_device_ethernet_init (NMDeviceEthernet *self)
 	priv = G_TYPE_INSTANCE_GET_PRIVATE (self, NM_TYPE_DEVICE_ETHERNET, NMDeviceEthernetPrivate);
 	self->_priv = priv;
 
-	priv->s390_options = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+	priv->s390_options = g_hash_table_new_full (nm_str_hash, g_str_equal, g_free, g_free);
 }
 
 static NMDeviceCapabilities
@@ -691,7 +691,6 @@ handle_auth_or_fail (NMDeviceEthernet *self,
 	tries_left = nm_settings_connection_get_autoconnect_retries (settings_connection);
 	if (tries_left == 0)
 		return NM_ACT_STAGE_RETURN_FAILURE;
-
 	if (tries_left > 0)
 		nm_settings_connection_set_autoconnect_retries (settings_connection, tries_left - 1);
 
@@ -1000,6 +999,7 @@ ppp_ip4_config (NMPPPManager *ppp_manager,
 static NMActStageReturn
 pppoe_stage3_ip4_config_start (NMDeviceEthernet *self, NMDeviceStateReason *out_failure_reason)
 {
+	NMDevice *device = NM_DEVICE (self);
 	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
 	NMSettingPppoe *s_pppoe;
 	NMActRequest *req;
@@ -1011,8 +1011,16 @@ pppoe_stage3_ip4_config_start (NMDeviceEthernet *self, NMDeviceStateReason *out_
 	s_pppoe = (NMSettingPppoe *) nm_device_get_applied_setting ((NMDevice *) self, NM_TYPE_SETTING_PPPOE);
 	g_return_val_if_fail (s_pppoe, NM_ACT_STAGE_RETURN_FAILURE);
 
-	priv->ppp_manager = nm_ppp_manager_create (nm_device_get_iface (NM_DEVICE (self)),
+	priv->ppp_manager = nm_ppp_manager_create (nm_device_get_iface (device),
 	                                           &err);
+
+	if (priv->ppp_manager) {
+		nm_ppp_manager_set_route_parameters (priv->ppp_manager,
+		                                     nm_device_get_route_table (device, AF_INET, TRUE),
+		                                     nm_device_get_route_metric (device, AF_INET),
+		                                     nm_device_get_route_table (device, AF_INET6, TRUE),
+		                                     nm_device_get_route_metric (device, AF_INET6));
+	}
 
 	if (   !priv->ppp_manager
 	    || !nm_ppp_manager_start (priv->ppp_manager, req,

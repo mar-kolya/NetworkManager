@@ -76,7 +76,7 @@ test_bogus(void)
 	g_assert (!addrlen);
 	g_assert (!nm_platform_link_get_address (NM_PLATFORM_GET, BOGUS_IFINDEX, NULL));
 
-	g_assert (!nm_platform_link_set_mtu (NM_PLATFORM_GET, BOGUS_IFINDEX, MTU));
+	g_assert (nm_platform_link_set_mtu (NM_PLATFORM_GET, BOGUS_IFINDEX, MTU) != NM_PLATFORM_ERROR_SUCCESS);
 
 	g_assert (!nm_platform_link_get_mtu (NM_PLATFORM_GET, BOGUS_IFINDEX));
 
@@ -512,7 +512,8 @@ test_bridge_addr (void)
 	plink = nm_platform_link_get (NM_PLATFORM_GET, link.ifindex);
 	g_assert (plink);
 
-	if (nm_platform_check_support_user_ipv6ll (NM_PLATFORM_GET)) {
+	if (nm_platform_check_kernel_support (NM_PLATFORM_GET,
+	                                      NM_PLATFORM_KERNEL_SUPPORT_USER_IPV6LL)) {
 		g_assert (!nm_platform_link_get_user_ipv6ll_enabled (NM_PLATFORM_GET, link.ifindex));
 		g_assert_cmpint (_nm_platform_uint8_inv (plink->inet6_addr_gen_mode_inv), ==, NM_IN6_ADDR_GEN_MODE_EUI64);
 
@@ -602,7 +603,7 @@ test_internal (void)
 	accept_signal (link_changed);
 
 	/* Set MTU */
-	g_assert (nm_platform_link_set_mtu (NM_PLATFORM_GET, ifindex, MTU));
+	g_assert (nm_platform_link_set_mtu (NM_PLATFORM_GET, ifindex, MTU) == NM_PLATFORM_ERROR_SUCCESS);
 	g_assert_cmpint (nm_platform_link_get_mtu (NM_PLATFORM_GET, ifindex), ==, MTU);
 	accept_signal (link_changed);
 

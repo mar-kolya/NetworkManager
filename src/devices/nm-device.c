@@ -34,6 +34,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <linux/if_addr.h>
+#include <linux/rtnetlink.h>
 
 #include "nm-utils/nm-dedup-multi.h"
 
@@ -65,13 +66,13 @@
 #include "nm-utils/c-list.h"
 #include "dns/nm-dns-manager.h"
 #include "nm-core-internal.h"
-#include "nm-default-route-manager.h"
 #include "systemd/nm-sd.h"
 #include "nm-lldp-listener.h"
 #include "nm-audit-manager.h"
 #include "nm-arping-manager.h"
 #include "nm-connectivity.h"
 #include "nm-dbus-interface.h"
+#include "nm-device-vlan.h"
 
 #include "nm-device-logging.h"
 _LOG_DECLARE_SELF (NMDevice);
@@ -318,6 +319,9 @@ typedef struct _NMDevicePrivate {
 	guint32 mtu_initial;
 	guint32 ip6_mtu_initial;
 
+	guint32         v4_route_table;
+	guint32         v6_route_table;
+
 	/* when carrier goes away, we give a grace period of CARRIER_WAIT_TIME_MS
 	 * until taking action.
 	 *
@@ -336,10 +340,15 @@ typedef struct _NMDevicePrivate {
 	bool            v4_commit_first_time:1;
 	bool            v6_commit_first_time:1;
 
+	bool            default_route_metric_penalty_ip4_has:1;
+	bool            default_route_metric_penalty_ip6_has:1;
+
 	NMDeviceSysIfaceState sys_iface_state:2;
 
+	bool            v4_route_table_initalized:1;
+	bool            v6_route_table_initalized:1;
+
 	/* Generic DHCP stuff */
-	guint32         dhcp_timeout;
 	char *          dhcp_anycast_address;
 
 	char *          current_stable_id;
@@ -360,14 +369,7 @@ typedef struct _NMDevicePrivate {
 	NMIP4Config *   ext_ip4_config; /* Stuff added outside NM */
 	NMIP4Config *   wwan_ip4_config; /* WWAN configuration */
 	GSList *        vpn4_configs;   /* VPNs which use this device */
-	struct {
-		bool v4_has;
-		bool v4_is_assumed;
-		bool v6_has;
-		bool v6_is_assumed;
-		NMPlatformIP4Route v4;
-		NMPlatformIP6Route v6;
-	} default_route;
+
 	bool v4_has_shadowed_routes;
 	const char *ip4_rp_filter;
 
@@ -404,6 +406,7 @@ typedef struct _NMDevicePrivate {
 	/* IPv4LL stuff */
 	sd_ipv4ll *    ipv4ll;
 	guint          ipv4ll_timeout;
+	guint          rt6_temporary_not_available_id;
 
 	/* IPv4 DAD stuff */
 	struct {
@@ -424,6 +427,8 @@ typedef struct _NMDevicePrivate {
 	GSList *       vpn6_configs;   /* VPNs which use this device */
 	bool           nm_ipv6ll; /* TRUE if NM handles the device's IPv6LL address */
 	NMIP6Config *  dad6_ip6_config;
+
+	GHashTable *   rt6_temporary_not_available;
 
 	NMNDisc *      ndisc;
 	gulong         ndisc_changed_id;
@@ -498,12 +503,13 @@ G_DEFINE_ABSTRACT_TYPE (NMDevice, nm_device, NM_TYPE_EXPORTED_OBJECT)
 
 static void nm_device_set_proxy_config (NMDevice *self, const char *pac_url);
 
+static gboolean update_ext_ip_config (NMDevice *self, int addr_family, gboolean initial, gboolean intersect_configs);
+
 static gboolean nm_device_set_ip4_config (NMDevice *self,
                                           NMIP4Config *config,
-                                          guint32 default_route_metric,
-                                          gboolean commit);
+                                          gboolean commit,
+                                          GPtrArray *ip4_dev_route_blacklist);
 static gboolean ip4_config_merge_and_apply (NMDevice *self,
-                                            NMIP4Config *config,
                                             gboolean commit);
 
 static gboolean nm_device_set_ip6_config (NMDevice *self,
@@ -525,7 +531,7 @@ static void nm_device_set_autoconnect_both (NMDevice *self, gboolean autoconnect
 static void nm_device_set_autoconnect_full (NMDevice *self, int autoconnect_intern, int autoconnect_user);
 
 static const char *_activation_func_to_string (ActivationHandleFunc func);
-static void activation_source_handle_cb (NMDevice *self, int family);
+static void activation_source_handle_cb (NMDevice *self, int addr_family);
 
 static void _set_state_full (NMDevice *self,
                              NMDeviceState state,
@@ -536,7 +542,7 @@ static gboolean queued_ip4_config_change (gpointer user_data);
 static gboolean queued_ip6_config_change (gpointer user_data);
 static void ip_check_ping_watch_cb (GPid pid, gint status, gpointer user_data);
 static gboolean ip_config_valid (NMDeviceState state);
-static NMActStageReturn dhcp4_start (NMDevice *self, NMConnection *connection);
+static NMActStageReturn dhcp4_start (NMDevice *self);
 static gboolean dhcp6_start (NMDevice *self, gboolean wait_for_ll);
 static void nm_device_start_ip_check (NMDevice *self);
 static void realize_start_setup (NMDevice *self,
@@ -545,8 +551,9 @@ static void realize_start_setup (NMDevice *self,
                                  const char *assume_state_connection_uuid,
                                  gboolean set_nm_owned,
                                  NMUnmanFlagOp unmanaged_user_explicit);
+static void _set_mtu (NMDevice *self, guint32 mtu);
 static void _commit_mtu (NMDevice *self, const NMIP4Config *config);
-static void dhcp_schedule_restart (NMDevice *self, int family, const char *reason);
+static void dhcp_schedule_restart (NMDevice *self, int addr_family, const char *reason);
 static void _cancel_activation (NMDevice *self);
 
 /*****************************************************************************/
@@ -745,6 +752,25 @@ nm_device_sys_iface_state_set (NMDevice *self,
 	nm_assert (priv->sys_iface_state == sys_iface_state);
 }
 
+static void
+_active_connection_set_state_flags_full (NMDevice *self,
+                                         NMActivationStateFlags flags,
+                                         NMActivationStateFlags mask)
+{
+	NMActiveConnection *ac;
+
+	ac = NM_ACTIVE_CONNECTION (nm_device_get_act_request (self));
+	if (ac)
+		nm_active_connection_set_state_flags_full (ac, flags, mask);
+}
+
+static void
+_active_connection_set_state_flags (NMDevice *self,
+                                    NMActivationStateFlags flags)
+{
+	_active_connection_set_state_flags_full (self, flags, flags);
+}
+
 /*****************************************************************************/
 
 void
@@ -827,26 +853,29 @@ nm_device_ipv4_sysctl_set (NMDevice *self, const char *property, const char *val
 	NMPlatform *platform = nm_device_get_platform (self);
 	gs_free char *value_to_free = NULL;
 	const char *value_to_set;
+	char buf[NM_UTILS_SYSCTL_IP_CONF_PATH_BUFSIZE];
 
 	if (value) {
 		value_to_set = value;
 	} else {
 		/* Set to a default value when we've got a NULL @value. */
 		value_to_free = nm_platform_sysctl_get (platform,
-		                                        NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip4_property_path ("default", property)));
+		                                        NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET, buf, "default", property)));
 		value_to_set = value_to_free;
 	}
 
 	return nm_platform_sysctl_set (platform,
-	                               NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip4_property_path (nm_device_get_ip_iface (self), property)),
+	                               NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET, buf, nm_device_get_ip_iface (self), property)),
 	                               value_to_set);
 }
 
 static guint32
 nm_device_ipv4_sysctl_get_uint32 (NMDevice *self, const char *property, guint32 fallback)
 {
+	char buf[NM_UTILS_SYSCTL_IP_CONF_PATH_BUFSIZE];
+
 	return nm_platform_sysctl_get_int_checked (nm_device_get_platform (self),
-	                                           NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip4_property_path (nm_device_get_ip_iface (self), property)),
+	                                           NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET, buf, nm_device_get_ip_iface (self), property)),
 	                                           10,
 	                                           0,
 	                                           G_MAXUINT32,
@@ -856,14 +885,18 @@ nm_device_ipv4_sysctl_get_uint32 (NMDevice *self, const char *property, guint32 
 gboolean
 nm_device_ipv6_sysctl_set (NMDevice *self, const char *property, const char *value)
 {
-	return nm_platform_sysctl_set (nm_device_get_platform (self), NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip6_property_path (nm_device_get_ip_iface (self), property)), value);
+	char buf[NM_UTILS_SYSCTL_IP_CONF_PATH_BUFSIZE];
+
+	return nm_platform_sysctl_set (nm_device_get_platform (self), NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET6, buf, nm_device_get_ip_iface (self), property)), value);
 }
 
 static guint32
 nm_device_ipv6_sysctl_get_uint32 (NMDevice *self, const char *property, guint32 fallback)
 {
+	char buf[NM_UTILS_SYSCTL_IP_CONF_PATH_BUFSIZE];
+
 	return nm_platform_sysctl_get_int_checked (nm_device_get_platform (self),
-	                                           NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip6_property_path (nm_device_get_ip_iface (self), property)),
+	                                           NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET6, buf, nm_device_get_ip_iface (self), property)),
 	                                           10,
 	                                           0,
 	                                           G_MAXUINT32,
@@ -980,14 +1013,29 @@ _set_ip_state (NMDevice *self, int addr_family, IpState new_state)
 	IpState *p;
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
-	nm_assert (NM_IN_SET (addr_family, AF_INET, AF_INET6));
+	nm_assert_addr_family (addr_family);
 
-	p = addr_family == AF_INET ? &priv->ip4_state_ : &priv->ip6_state_;
+	p =   (addr_family == AF_INET)
+	    ? &priv->ip4_state_
+        : &priv->ip6_state_;
 
 	if (*p != new_state) {
-		_LOGT (LOGD_DEVICE, "ip%c-state: set to %d (%s)", addr_family == AF_INET ? '4' : '6',
-		       (int) new_state, _ip_state_to_string (new_state));
+		_LOGT (LOGD_DEVICE, "ip%c-state: set to %d (%s)",
+		       nm_utils_addr_family_to_char (addr_family),
+		       (int) new_state,
+		       _ip_state_to_string (new_state));
 		*p = new_state;
+
+		if (new_state == IP_DONE) {
+			/* we only set the IPx_READY flag once we reach IP_DONE state. We don't
+			 * ever clear it, even if we later enter IP_FAIL state.
+			 *
+			 * This is not documented/guaranteed behavior, but seems to make sense for now. */
+			_active_connection_set_state_flags (self,
+			                                    addr_family == AF_INET
+			                                      ? NM_ACTIVATION_STATE_FLAG_IP4_READY
+			                                      : NM_ACTIVATION_STATE_FLAG_IP6_READY);
+		}
 	}
 }
 
@@ -1010,15 +1058,18 @@ nm_device_get_iface (NMDevice *self)
 }
 
 gboolean
-nm_device_take_over_link (NMDevice *self, const char *ifname)
+nm_device_take_over_link (NMDevice *self, const char *ifname, gboolean *renamed)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	const NMPlatformLink *plink;
 	NMPlatform *platform;
-	gboolean up, success;
+	gboolean up, success = TRUE;
 	int ifindex;
 
 	g_return_val_if_fail (priv->ifindex <= 0, FALSE);
+	g_return_val_if_fail (ifname, FALSE);
+
+	NM_SET_OUT (renamed, FALSE);
 
 	platform = nm_device_get_platform (self);
 	plink = nm_platform_link_get_by_ifname (platform, ifname);
@@ -1026,14 +1077,19 @@ nm_device_take_over_link (NMDevice *self, const char *ifname)
 		return FALSE;
 
 	ifindex = plink->ifindex;
-	up = NM_FLAGS_HAS (plink->n_ifi_flags, IFF_UP);
 
-	/* Rename the link to the device ifname */
-	if (up)
-		nm_platform_link_set_down (platform, ifindex);
-	success = nm_platform_link_set_name (platform, ifindex, nm_device_get_iface (self));
-	if (up)
-		nm_platform_link_set_up (platform, ifindex, NULL);
+	if (!nm_streq (ifname, nm_device_get_iface (self))) {
+		up = NM_FLAGS_HAS (plink->n_ifi_flags, IFF_UP);
+
+		/* Rename the link to the device ifname */
+		if (up)
+			nm_platform_link_set_down (platform, ifindex);
+		success = nm_platform_link_set_name (platform, ifindex, nm_device_get_iface (self));
+		if (up)
+			nm_platform_link_set_up (platform, ifindex, NULL);
+
+		NM_SET_OUT (renamed, success);
+	}
 
 	if (success) {
 		priv->ifindex = ifindex;
@@ -1156,7 +1212,8 @@ nm_device_set_ip_iface (NMDevice *self, const char *iface)
 	}
 
 	if (priv->ip_ifindex > 0) {
-		if (nm_platform_check_support_user_ipv6ll (nm_device_get_platform (self)))
+		if (nm_platform_check_kernel_support (nm_device_get_platform (self),
+		                                      NM_PLATFORM_KERNEL_SUPPORT_USER_IPV6LL))
 			nm_platform_link_set_user_ipv6ll_enabled (nm_device_get_platform (self), priv->ip_ifindex, TRUE);
 
 		if (!nm_platform_link_is_up (nm_device_get_platform (self), priv->ip_ifindex))
@@ -1543,23 +1600,14 @@ nm_device_get_metered (NMDevice *self)
 	return NM_DEVICE_GET_PRIVATE (self)->metered;
 }
 
-/**
- * nm_device_get_priority():
- * @self: the #NMDevice
- *
- * Returns: the device's routing priority.  Lower numbers means a "better"
- *  device, eg higher priority.
- */
-int
-nm_device_get_priority (NMDevice *self)
+static guint32
+_get_route_metric_default (NMDevice *self)
 {
-	g_return_val_if_fail (NM_IS_DEVICE (self), 1000);
-
 	/* Device 'priority' is used for the default route-metric and is based on
 	 * the device type. The settings ipv4.route-metric and ipv6.route-metric
 	 * can overwrite this default.
 	 *
-	 * Currently for both IPv4 and IPv6 we use the same default values.
+	 * For both IPv4 and IPv6 we use the same default values.
 	 *
 	 * The route-metric is used for the metric of the routes of device.
 	 * This also applies to the default route. Therefore it affects also
@@ -1625,29 +1673,40 @@ nm_device_get_priority (NMDevice *self)
 	return 11000;
 }
 
-static guint32
-route_metric_with_penalty (NMDevice *self, guint32 metric)
+static gboolean
+default_route_metric_penalty_detect (NMDevice *self)
 {
 #if WITH_CONCHECK
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	const guint32 PENALTY = 20000;
 
-	/* Beware: for IPv6, a metric of 0 effectively means 1024.
-	 * Only pass a normalized IPv6 metric (nm_utils_ip6_route_metric_normalize). */
-
+	/* currently we don't differentiate between IPv4 and IPv6 when detecting
+	 * connectivity. */
 	if (   priv->connectivity_state != NM_CONNECTIVITY_FULL
-	    && nm_connectivity_check_enabled (nm_connectivity_get ())) {
-		if (metric >= G_MAXUINT32 - PENALTY)
-			return G_MAXUINT32;
-		return metric + PENALTY;
+		&& nm_connectivity_check_enabled (nm_connectivity_get ())) {
+		return TRUE;
 	}
 #endif
-	return metric;
+
+	return FALSE;
 }
 
 static guint32
-_get_ipx_route_metric (NMDevice *self,
-                       gboolean is_v4)
+default_route_metric_penalty_get (NMDevice *self, int addr_family)
+{
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
+	nm_assert_addr_family (addr_family);
+
+	if (  addr_family == AF_INET
+	    ? priv->default_route_metric_penalty_ip4_has
+	    : priv->default_route_metric_penalty_ip6_has)
+		return 20000;
+	return 0;
+}
+
+guint32
+nm_device_get_route_metric (NMDevice *self,
+                            int addr_family)
 {
 	char *value;
 	gint64 route_metric;
@@ -1655,10 +1714,11 @@ _get_ipx_route_metric (NMDevice *self,
 	NMConnection *connection;
 
 	g_return_val_if_fail (NM_IS_DEVICE (self), G_MAXUINT32);
+	g_return_val_if_fail (NM_IN_SET (addr_family, AF_INET, AF_INET6), G_MAXUINT32);
 
 	connection = nm_device_get_applied_connection (self);
 	if (connection) {
-		s_ip = is_v4
+		s_ip = addr_family == AF_INET
 		       ? nm_connection_get_setting_ip4_config (connection)
 		       : nm_connection_get_setting_ip6_config (connection);
 
@@ -1677,7 +1737,7 @@ _get_ipx_route_metric (NMDevice *self,
 	 * Note that that means that the route-metric might change between SIGHUP.
 	 * You must cache the returned value if that is a problem. */
 	value = nm_config_data_get_connection_default (NM_CONFIG_GET_DATA,
-	                                               is_v4 ? "ipv4.route-metric" : "ipv6.route-metric", self);
+	                                               addr_family == AF_INET ? "ipv4.route-metric" : "ipv6.route-metric", self);
 	if (value) {
 		route_metric = _nm_utils_ascii_str_to_int64 (value, 10, 0, G_MAXUINT32, -1);
 		g_free (value);
@@ -1685,81 +1745,96 @@ _get_ipx_route_metric (NMDevice *self,
 		if (route_metric >= 0)
 			goto out;
 	}
-	route_metric = nm_device_get_priority (self);
+	route_metric = _get_route_metric_default (self);
 out:
-	if (!is_v4)
-		route_metric = nm_utils_ip6_route_metric_normalize (route_metric);
-	return route_metric;
+	return nm_utils_ip_route_metric_normalize (addr_family, route_metric);
 }
 
 guint32
-nm_device_get_ip4_route_metric (NMDevice *self)
+nm_device_get_route_table (NMDevice *self,
+                           int addr_family,
+                           gboolean fallback_main)
 {
-	return _get_ipx_route_metric (self, TRUE);
-}
+	NMDevicePrivate *priv;
+	NMConnection *connection;
+	NMSettingIPConfig *s_ip;
+	guint32 route_table = 0;
 
-guint32
-nm_device_get_ip6_route_metric (NMDevice *self)
-{
-	return _get_ipx_route_metric (self, FALSE);
-}
+	nm_assert_addr_family (addr_family);
 
-static void
-_update_default_route (NMDevice *self, int addr_family, gboolean has, gboolean is_assumed)
-{
-	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	bool *p_has, *p_is_assumed;
+	g_return_val_if_fail (NM_IS_DEVICE (self), RT_TABLE_MAIN);
 
-	nm_assert (NM_IN_SET (addr_family, 0, AF_INET, AF_INET6));
+	priv = NM_DEVICE_GET_PRIVATE (self);
 
+	/* the route table setting affects how we sync routes. We shall
+	 * not change it while the device is active, hence, cache it. */
 	if (addr_family == AF_INET) {
-		p_has = &priv->default_route.v4_has;
-		p_is_assumed = &priv->default_route.v4_is_assumed;
+		if (priv->v4_route_table_initalized)
+			return priv->v4_route_table ?: (fallback_main ? RT_TABLE_MAIN : 0);
 	} else {
-		p_has = &priv->default_route.v6_has;
-		p_is_assumed = &priv->default_route.v6_is_assumed;
+		if (priv->v6_route_table_initalized)
+			return priv->v6_route_table ?: (fallback_main ? RT_TABLE_MAIN : 0);
 	}
 
-	if (*p_has == has && *p_is_assumed == is_assumed)
-		return;
+	connection = nm_device_get_applied_connection (self);
+	if (connection) {
+		if (addr_family == AF_INET)
+			s_ip = nm_connection_get_setting_ip4_config (connection);
+		else
+			s_ip = nm_connection_get_setting_ip6_config (connection);
 
-	*p_has = has;
-	*p_is_assumed = is_assumed;
+		if (s_ip)
+			route_table = nm_setting_ip_config_get_route_table (s_ip);
 
-	if (addr_family == AF_INET)
-		nm_default_route_manager_ip4_update_default_route (nm_netns_get_default_route_manager (priv->netns), self);
-	else
-		nm_default_route_manager_ip6_update_default_route (nm_netns_get_default_route_manager (priv->netns), self);
+		/* we only lookup the global default if we also have an applied
+		 * connection. Otherwise, the connection is not active, and the
+		 * connection default doesn't matter. */
+		if (route_table == 0) {
+			gs_free char *value = NULL;
+
+			value = nm_config_data_get_connection_default (NM_CONFIG_GET_DATA,
+			                                               addr_family == AF_INET
+			                                                 ? "ipv4.route-table"
+			                                                 : "ipv6.route-table",
+			                                               self);
+			route_table = _nm_utils_ascii_str_to_int64 (value, 10, 0, G_MAXUINT32, 0);
+		}
+	}
+
+	if (addr_family == AF_INET) {
+		priv->v4_route_table_initalized = TRUE;
+		priv->v4_route_table = route_table;
+	} else {
+		priv->v6_route_table_initalized = TRUE;
+		priv->v6_route_table = route_table;
+	}
+
+	_LOGT (LOGD_DEVICE,
+	       "ipv%c.route-table = %u%s",
+	       addr_family == AF_INET ? '4' : '6',
+	       (guint) (route_table ?: RT_TABLE_MAIN),
+	       route_table ? "" : " (policy routing not enabled)");
+
+	return route_table ?: (fallback_main ? RT_TABLE_MAIN : 0);
 }
 
-const NMPlatformIP4Route *
-nm_device_get_ip4_default_route (NMDevice *self, gboolean *out_is_assumed)
+const NMPObject *
+nm_device_get_best_default_route (NMDevice *self,
+                                  int addr_family)
 {
-	NMDevicePrivate *priv;
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
-	g_return_val_if_fail (NM_IS_DEVICE (self), NULL);
-
-	priv = NM_DEVICE_GET_PRIVATE (self);
-
-	if (out_is_assumed)
-		*out_is_assumed = priv->default_route.v4_is_assumed;
-
-	return priv->default_route.v4_has ? &priv->default_route.v4 : NULL;
-}
-
-const NMPlatformIP6Route *
-nm_device_get_ip6_default_route (NMDevice *self, gboolean *out_is_assumed)
-{
-	NMDevicePrivate *priv;
-
-	g_return_val_if_fail (NM_IS_DEVICE (self), NULL);
-
-	priv = NM_DEVICE_GET_PRIVATE (self);
-
-	if (out_is_assumed)
-		*out_is_assumed = priv->default_route.v6_is_assumed;
-
-	return priv->default_route.v6_has ? &priv->default_route.v6 : NULL;
+	switch (addr_family) {
+	case AF_INET:
+		return priv->ip4_config ? nm_ip4_config_best_default_route_get (priv->ip4_config) : NULL;
+	case AF_INET6:
+		return priv->ip6_config ? nm_ip6_config_best_default_route_get (priv->ip6_config) : NULL;
+	case AF_UNSPEC:
+		return    (priv->ip4_config ? nm_ip4_config_best_default_route_get (priv->ip4_config) : NULL)
+		       ?: (priv->ip6_config ? nm_ip6_config_best_default_route_get (priv->ip6_config) : NULL);
+	default:
+		g_return_val_if_reached (NULL);
+	}
 }
 
 const char *
@@ -1876,7 +1951,7 @@ update_connectivity_state (NMDevice *self, NMConnectivityState state)
 	/* If the connectivity check is disabled, make an optimistic guess. */
 	if (state == NM_CONNECTIVITY_UNKNOWN) {
 		if (priv->state == NM_DEVICE_STATE_ACTIVATED) {
-			if (priv->default_route.v4_has || priv->default_route.v6_has)
+			if (nm_device_get_best_default_route (self, AF_UNSPEC))
 				state = NM_CONNECTIVITY_FULL;
 			else
 				state = NM_CONNECTIVITY_LIMITED;
@@ -1896,12 +1971,12 @@ update_connectivity_state (NMDevice *self, NMConnectivityState state)
 
 		if (   priv->state == NM_DEVICE_STATE_ACTIVATED
 		    && !nm_device_sys_iface_state_is_external (self)) {
-			if (   priv->default_route.v4_has
-			    && !ip4_config_merge_and_apply (self, NULL, TRUE))
-				_LOGW (LOGD_IP4, "Failed to update IPv4 default route metric");
-			if (   priv->default_route.v6_has
+			if (   nm_device_get_best_default_route (self, AF_INET)
+			    && !ip4_config_merge_and_apply (self, TRUE))
+				_LOGW (LOGD_IP4, "Failed to update IPv4 route metric");
+			if (   nm_device_get_best_default_route (self, AF_INET6)
 			    && !ip6_config_merge_and_apply (self, TRUE))
-				_LOGW (LOGD_IP6, "Failed to update IPv6 default route metric");
+				_LOGW (LOGD_IP6, "Failed to update IPv6 route metric");
 		}
 	}
 }
@@ -2015,7 +2090,7 @@ concheck_periodic_update (NMDevice *self)
 	gboolean check_enable;
 
 	check_enable =    (priv->state == NM_DEVICE_STATE_ACTIVATED)
-	               && (priv->default_route.v4_has || priv->default_route.v6_has);
+	               && nm_device_get_best_default_route (self, AF_UNSPEC);
 
 	if (check_enable && !priv->concheck_periodic_id) {
 		/* We just gained a default route. Enable periodic checking. */
@@ -2173,6 +2248,12 @@ nm_device_master_release_one_slave (NMDevice *self, NMDevice *slave, gboolean co
 	g_signal_handler_disconnect (slave, info->watch_id);
 	g_object_unref (slave);
 	g_slice_free (SlaveInfo, info);
+
+	if (c_list_is_empty (&priv->slaves)) {
+		_active_connection_set_state_flags_full (self,
+		                                         0,
+		                                         NM_ACTIVATION_STATE_FLAG_MASTER_HAS_SLAVES);
+	}
 
 	/* Ensure the device's hardware address is up-to-date; it often changes
 	 * when slaves change.
@@ -2600,10 +2681,7 @@ device_link_changed (NMDevice *self)
 		_notify (self, PROP_DRIVER);
 	}
 
-	if (priv->mtu != info.mtu) {
-		priv->mtu = info.mtu;
-		_notify (self, PROP_MTU);
-	}
+	_set_mtu (self, info.mtu);
 
 	if (ifindex == nm_device_get_ip_ifindex (self))
 		_stats_update_counters_from_pllink (self, &info);
@@ -2664,6 +2742,7 @@ device_link_changed (NMDevice *self)
 		NMDeviceStateReason reason;
 
 		nm_device_set_unmanaged_by_user_udev (self);
+		nm_device_set_unmanaged_by_user_conf (self);
 
 		reason = NM_DEVICE_STATE_REASON_NOW_MANAGED;
 
@@ -2694,7 +2773,7 @@ device_link_changed (NMDevice *self)
 		/* the link was down and just came up. That happens for example, while changing MTU.
 		 * We must restore IP configuration. */
 		if (priv->ip4_state == IP_DONE) {
-			if (!ip4_config_merge_and_apply (self, NULL, TRUE))
+			if (!ip4_config_merge_and_apply (self, TRUE))
 				_LOGW (LOGD_IP4, "failed applying IP4 config after link comes up again");
 		}
 		if (priv->ip6_state == IP_DONE) {
@@ -2785,11 +2864,13 @@ typedef struct {
 static guint
 _v4_has_shadowed_routes_detect_hash (const IP4RPFilterData *d)
 {
-	guint h = 0;
+	NMHashState h;
 
-	h = NM_HASH_COMBINE (h, d->network);
-	h = NM_HASH_COMBINE (h, d->plen);
-	return h;
+	nm_hash_init (&h, 1105201169u);
+	nm_hash_update_vals (&h,
+	                     d->network,
+	                     d->plen);
+	return nm_hash_complete (&h);
 }
 
 static gboolean
@@ -2877,7 +2958,7 @@ ip4_rp_filter_update (NMDevice *self)
 	const char *ip4_rp_filter;
 
 	if (   priv->v4_has_shadowed_routes
-	    || priv->default_route.v4_has) {
+	    || nm_device_get_best_default_route (self, AF_INET)) {
 		if (nm_device_ipv4_sysctl_get_uint32 (self, "rp_filter", 0) != 1) {
 			/* Don't touch the rp_filter if it's not strict. */
 			return;
@@ -2975,7 +3056,9 @@ nm_device_realize_start (NMDevice *self,
                          gboolean *out_compatible,
                          GError **error)
 {
-	NMPlatformLink plink_copy;
+	nm_auto_nmpobj const NMPObject *plink_keep_alive = NULL;
+
+	nm_assert (!plink || NMP_OBJECT_GET_TYPE (NMP_OBJECT_UP_CAST (plink)) == NMP_OBJECT_TYPE_LINK);
 
 	NM_SET_OUT (out_compatible, TRUE);
 
@@ -2989,13 +3072,12 @@ nm_device_realize_start (NMDevice *self,
 
 		if (!link_type_compatible (self, plink->type, out_compatible, error))
 			return FALSE;
+
+		plink_keep_alive = nmp_object_ref (NMP_OBJECT_UP_CAST (plink));
 	}
 
-	if (plink) {
-		plink_copy = *plink;
-		plink = &plink_copy;
-	}
-	realize_start_setup (self, plink,
+	realize_start_setup (self,
+	                     plink,
 	                     assume_state_guess_assume,
 	                     assume_state_connection_uuid,
 	                     set_nm_owned,
@@ -3021,8 +3103,8 @@ nm_device_create_and_realize (NMDevice *self,
                               NMDevice *parent,
                               GError **error)
 {
+	nm_auto_nmpobj const NMPObject *plink_keep_alive = NULL;
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	NMPlatformLink plink_copy;
 	const NMPlatformLink *plink = NULL;
 
 	/* Must be set before device is realized */
@@ -3035,12 +3117,13 @@ nm_device_create_and_realize (NMDevice *self,
 		if (!NM_DEVICE_GET_CLASS (self)->create_and_realize (self, connection, parent, &plink, error))
 			return FALSE;
 		if (plink) {
-			plink_copy = *plink;
-			plink = &plink_copy;
+			nm_assert (NMP_OBJECT_GET_TYPE (NMP_OBJECT_UP_CAST (plink)) == NMP_OBJECT_TYPE_LINK);
+			plink_keep_alive = nmp_object_ref (NMP_OBJECT_UP_CAST (plink));
 		}
 	}
 
-	realize_start_setup (self, plink,
+	realize_start_setup (self,
+	                     plink,
 	                     FALSE, /* assume_state_guess_assume */
 	                     NULL,  /* assume_state_connection_uuid */
 	                     FALSE, NM_UNMAN_FLAG_OP_FORGET);
@@ -3165,7 +3248,10 @@ realize_start_setup (NMDevice *self,
 	NMDeviceCapabilities capabilities = 0;
 	NMConfig *config;
 	guint real_rate;
-	guint32 mtu;
+
+	/* plink is a NMPlatformLink type, however, we require it to come from the platform
+	 * cache (where else would it come from?). */
+	nm_assert (!plink || NMP_OBJECT_GET_TYPE (NMP_OBJECT_UP_CAST (plink)) == NMP_OBJECT_TYPE_LINK);
 
 	g_return_if_fail (NM_IS_DEVICE (self));
 
@@ -3190,10 +3276,7 @@ realize_start_setup (NMDevice *self,
 	priv->mtu_initial = 0;
 	priv->ip6_mtu_initial = 0;
 	priv->ip6_mtu = 0;
-	if (priv->mtu) {
-		priv->mtu = 0;
-		_notify (self, PROP_MTU);
-	}
+	_set_mtu (self, 0);
 
 	_assume_state_set (self, assume_state_guess_assume, assume_state_connection_uuid);
 
@@ -3214,11 +3297,9 @@ realize_start_setup (NMDevice *self,
 		if (nm_platform_link_is_software (nm_device_get_platform (self), priv->ifindex))
 			capabilities |= NM_DEVICE_CAP_IS_SOFTWARE;
 
-		mtu = nm_platform_link_get_mtu (nm_device_get_platform (self), priv->ifindex);
-		if (priv->mtu != mtu) {
-			priv->mtu = mtu;
-			_notify (self, PROP_MTU);
-		}
+		_set_mtu (self,
+		          nm_platform_link_get_mtu (nm_device_get_platform (self),
+		                                    priv->ifindex));
 
 		nm_platform_link_get_driver_info (nm_device_get_platform (self),
 		                                  priv->ifindex,
@@ -3230,7 +3311,8 @@ realize_start_setup (NMDevice *self,
 		if (priv->firmware_version)
 			_notify (self, PROP_FIRMWARE_VERSION);
 
-		if (nm_platform_check_support_user_ipv6ll (nm_device_get_platform (self)))
+		if (nm_platform_check_kernel_support (nm_device_get_platform (self),
+		                                      NM_PLATFORM_KERNEL_SUPPORT_USER_IPV6LL))
 			priv->nm_ipv6ll = nm_platform_link_get_user_ipv6ll_enabled (nm_device_get_platform (self), priv->ifindex);
 
 		if (nm_platform_link_supports_sriov (nm_device_get_platform (self), priv->ifindex))
@@ -3302,6 +3384,7 @@ realize_start_setup (NMDevice *self,
 	nm_device_set_unmanaged_flags (self, NM_UNMANAGED_LOOPBACK, priv->ifindex == 1);
 
 	nm_device_set_unmanaged_by_user_udev (self);
+	nm_device_set_unmanaged_by_user_conf (self);
 
 	nm_device_set_unmanaged_flags (self, NM_UNMANAGED_PLATFORM_INIT,
 	                               plink && !plink->initialized);
@@ -3412,7 +3495,6 @@ nm_device_unrealize (NMDevice *self, gboolean remove_resources, GError **error)
 	g_return_val_if_fail (priv->iface != NULL, FALSE);
 	g_return_val_if_fail (priv->real, FALSE);
 
-	g_object_freeze_notify (G_OBJECT (self));
 
 	ifindex = nm_device_get_ifindex (self);
 
@@ -3429,6 +3511,7 @@ nm_device_unrealize (NMDevice *self, gboolean remove_resources, GError **error)
 		}
 	}
 
+	g_object_freeze_notify (G_OBJECT (self));
 	NM_DEVICE_GET_CLASS (self)->unrealize_notify (self);
 
 	_parent_set_ifindex (self, 0, FALSE);
@@ -3441,10 +3524,7 @@ nm_device_unrealize (NMDevice *self, gboolean remove_resources, GError **error)
 	if (nm_clear_g_free (&priv->ip_iface))
 		_notify (self, PROP_IP_IFACE);
 
-	if (priv->mtu != 0) {
-		priv->mtu = 0;
-		_notify (self, PROP_MTU);
-	}
+	_set_mtu (self, 0);
 
 	if (priv->driver_version) {
 		g_clear_pointer (&priv->driver_version, g_free);
@@ -3674,6 +3754,9 @@ nm_device_master_add_slave (NMDevice *self, NMDevice *slave, gboolean configure)
 		                                   G_CALLBACK (slave_state_changed), self);
 		c_list_link_tail (&priv->slaves, &info->lst_slave);
 		slave_priv->master = g_object_ref (self);
+
+		_active_connection_set_state_flags (self,
+		                                    NM_ACTIVATION_STATE_FLAG_MASTER_HAS_SLAVES);
 
 		/* no need to emit
 		 *
@@ -3923,16 +4006,7 @@ nm_device_removed (NMDevice *self, gboolean unconfigure_ip_config)
 	if (!unconfigure_ip_config)
 		return;
 
-	/* Clean up IP configs; this does not actually deconfigure the
-	 * interface, it just clears the configuration to which policy
-	 * is reacting via NM_DEVICE_IP4_CONFIG_CHANGED/NM_DEVICE_IP6_CONFIG_CHANGED
-	 * signal. As NMPolicy registered the NMIPxConfig instances in NMDnsManager,
-	 * these would be leaked otherwise. */
-	_update_default_route (self, AF_INET,  priv->default_route.v4_has, TRUE);
-	_update_default_route (self, AF_INET6, priv->default_route.v6_has, TRUE);
-	_update_default_route (self, AF_INET,  FALSE, TRUE);
-	_update_default_route (self, AF_INET6, FALSE, TRUE);
-	nm_device_set_ip4_config (self, NULL, 0, FALSE);
+	nm_device_set_ip4_config (self, NULL, FALSE, NULL);
 	nm_device_set_ip6_config (self, NULL, FALSE);
 }
 
@@ -4310,6 +4384,8 @@ nm_device_generate_connection (NMDevice *self,
 		s_ip6 = nm_ip6_config_create_setting (priv->ip6_config);
 		nm_connection_add_setting (connection, s_ip6);
 
+		nm_connection_add_setting (connection, nm_setting_proxy_new ());
+
 		pllink = nm_platform_link_get (nm_device_get_platform (self), priv->ifindex);
 		if (pllink && pllink->inet6_token.id) {
 			g_object_set (s_ip6,
@@ -4390,6 +4466,65 @@ nm_device_complete_connection (NMDevice *self,
 		success = nm_connection_verify (connection, error);
 
 	return success;
+}
+
+gboolean
+nm_device_match_parent (NMDevice *self, const char *parent)
+{
+	NMDevice *parent_device;
+
+	g_return_val_if_fail (parent, FALSE);
+
+	parent_device = nm_device_parent_get_device (self);
+	if (!parent_device)
+		return FALSE;
+
+	if (nm_utils_is_uuid (parent)) {
+		NMConnection *connection;
+
+		/* If the parent is a UUID, the connection matches when there is
+		 * no connection active on the device or when a connection with
+		 * that UUID is active.
+		 */
+		connection = nm_device_get_applied_connection (self);
+		if (!connection)
+			return TRUE;
+
+		if (!nm_streq0 (parent, nm_connection_get_uuid (connection)))
+			return FALSE;
+	} else {
+		/* Interface name */
+		if (!nm_streq0 (parent, nm_device_get_ip_iface (parent_device)))
+			return FALSE;
+	}
+
+	return TRUE;
+}
+
+gboolean
+nm_device_match_hwaddr (NMDevice *device,
+                        NMConnection *connection,
+                        gboolean fail_if_no_hwaddr)
+{
+	NMSettingWired *s_wired;
+	NMDevice *parent_device;
+	const char *setting_mac;
+	const char *parent_mac;
+
+	s_wired = nm_connection_get_setting_wired (connection);
+	if (!s_wired)
+		return !fail_if_no_hwaddr;
+
+	setting_mac = nm_setting_wired_get_mac_address (s_wired);
+	if (!setting_mac)
+		return !fail_if_no_hwaddr;
+
+	parent_device = nm_device_parent_get_device (device);
+	if (!parent_device)
+		return !fail_if_no_hwaddr;
+
+	parent_mac = nm_device_get_permanent_hw_address (parent_device);
+	return parent_mac && nm_utils_hwaddr_matches (setting_mac, -1, parent_mac, -1);
 }
 
 static gboolean
@@ -4637,44 +4772,49 @@ activation_source_handle_cb6 (gpointer user_data)
 
 static ActivationHandleData *
 activation_source_get_by_family (NMDevice *self,
-                                 int family,
+                                 int addr_family,
                                  GSourceFunc *out_idle_func)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
-	if (family == AF_INET6) {
+	switch (addr_family) {
+	case AF_INET6:
 		NM_SET_OUT (out_idle_func, activation_source_handle_cb6);
 		return &priv->act_handle6;
-	} else {
+	case AF_INET:
 		NM_SET_OUT (out_idle_func, activation_source_handle_cb4);
-		g_return_val_if_fail (family == AF_INET, &priv->act_handle4);
 		return &priv->act_handle4;
 	}
+	g_return_val_if_reached (NULL);
 }
 
 static void
-activation_source_clear (NMDevice *self, int family)
+activation_source_clear (NMDevice *self,
+                         int addr_family)
 {
 	ActivationHandleData *act_data;
 
-	act_data = activation_source_get_by_family (self, family, NULL);
+	act_data = activation_source_get_by_family (self, addr_family, NULL);
 
 	if (act_data->id) {
-		_LOGD (LOGD_DEVICE, "activation-stage: clear %s,%d (id %u)",
-		       _activation_func_to_string (act_data->func), family, act_data->id);
+		_LOGD (LOGD_DEVICE, "activation-stage: clear %s,v%c (id %u)",
+		       _activation_func_to_string (act_data->func),
+		       nm_utils_addr_family_to_char (addr_family),
+		       act_data->id);
 		nm_clear_g_source (&act_data->id);
 		act_data->func = NULL;
 	}
 }
 
 static void
-activation_source_handle_cb (NMDevice *self, int family)
+activation_source_handle_cb (NMDevice *self,
+                             int addr_family)
 {
 	ActivationHandleData *act_data, a;
 
 	g_return_if_fail (NM_IS_DEVICE (self));
 
-	act_data = activation_source_get_by_family (self, family, NULL);
+	act_data = activation_source_get_by_family (self, addr_family, NULL);
 
 	g_return_if_fail (act_data->id);
 	g_return_if_fail (act_data->func);
@@ -4684,23 +4824,27 @@ activation_source_handle_cb (NMDevice *self, int family)
 	act_data->func = NULL;
 	act_data->id = 0;
 
-	_LOGD (LOGD_DEVICE, "activation-stage: invoke %s,%d (id %u)",
-	       _activation_func_to_string (a.func), family, a.id);
+	_LOGD (LOGD_DEVICE, "activation-stage: invoke %s,v%c (id %u)",
+	       _activation_func_to_string (a.func),
+	       nm_utils_addr_family_to_char (addr_family),
+	       a.id);
 
 	a.func (self);
 
-	_LOGD (LOGD_DEVICE, "activation-stage: complete %s,%d (id %u)",
-	       _activation_func_to_string (a.func), family, a.id);
+	_LOGD (LOGD_DEVICE, "activation-stage: complete %s,v%c (id %u)",
+	       _activation_func_to_string (a.func),
+	       nm_utils_addr_family_to_char (addr_family),
+	       a.id);
 }
 
 static void
-activation_source_schedule (NMDevice *self, ActivationHandleFunc func, int family)
+activation_source_schedule (NMDevice *self, ActivationHandleFunc func, int addr_family)
 {
 	ActivationHandleData *act_data;
 	GSourceFunc source_func;
 	guint new_id = 0;
 
-	act_data = activation_source_get_by_family (self, family, &source_func);
+	act_data = activation_source_get_by_family (self, addr_family, &source_func);
 
 	if (act_data->id && act_data->func == func) {
 		/* Don't bother rescheduling the same function that's about to
@@ -4708,22 +4852,28 @@ activation_source_schedule (NMDevice *self, ActivationHandleFunc func, int famil
 		 * streams of associate events before NM has had a chance to process
 		 * the first one.
 		 */
-		_LOGD (LOGD_DEVICE, "activation-stage: already scheduled %s,%d (id %u)",
-		       _activation_func_to_string (func), family, act_data->id);
+		_LOGD (LOGD_DEVICE, "activation-stage: already scheduled %s,v%c (id %u)",
+		       _activation_func_to_string (func),
+		       nm_utils_addr_family_to_char (addr_family),
+		       act_data->id);
 		return;
 	}
 
 	new_id = g_idle_add (source_func, self);
 
 	if (act_data->id) {
-		_LOGW (LOGD_DEVICE, "activation-stage: schedule %s,%d which replaces %s,%d (id %u -> %u)",
-		       _activation_func_to_string (func), family,
-		       _activation_func_to_string (act_data->func), family,
+		_LOGW (LOGD_DEVICE, "activation-stage: schedule %s,v%c which replaces %s,v%c (id %u -> %u)",
+		       _activation_func_to_string (func),
+		       nm_utils_addr_family_to_char (addr_family),
+		       _activation_func_to_string (act_data->func),
+		       nm_utils_addr_family_to_char (addr_family),
 		       act_data->id, new_id);
 		nm_clear_g_source (&act_data->id);
 	} else {
-		_LOGD (LOGD_DEVICE, "activation-stage: schedule %s,%d (id %u)",
-		       _activation_func_to_string (func), family, new_id);
+		_LOGD (LOGD_DEVICE, "activation-stage: schedule %s,v%c (id %u)",
+		       _activation_func_to_string (func),
+		       nm_utils_addr_family_to_char (addr_family),
+		       new_id);
 	}
 
 	act_data->func = func;
@@ -4731,29 +4881,28 @@ activation_source_schedule (NMDevice *self, ActivationHandleFunc func, int famil
 }
 
 static gboolean
-activation_source_is_scheduled (NMDevice *self, ActivationHandleFunc func, int family)
+activation_source_is_scheduled (NMDevice *self,
+                                ActivationHandleFunc func,
+                                int addr_family)
 {
 	ActivationHandleData *act_data;
 
-	act_data = activation_source_get_by_family (self, family, NULL);
+	act_data = activation_source_get_by_family (self, addr_family, NULL);
 	return act_data->func == func;
 }
 
 /*****************************************************************************/
 
 static gboolean
-get_ip_config_may_fail (NMDevice *self, int family)
+get_ip_config_may_fail (NMDevice *self, int addr_family)
 {
 	NMConnection *connection;
 	NMSettingIPConfig *s_ip = NULL;
 
-	g_return_val_if_fail (self != NULL, TRUE);
-
 	connection = nm_device_get_applied_connection (self);
-	g_assert (connection);
 
 	/* Fail the connection if the failed IP method is required to complete */
-	switch (family) {
+	switch (addr_family) {
 	case AF_INET:
 		s_ip = nm_connection_get_setting_ip4_config (connection);
 		break;
@@ -4761,7 +4910,7 @@ get_ip_config_may_fail (NMDevice *self, int family)
 		s_ip = nm_connection_get_setting_ip6_config (connection);
 		break;
 	default:
-		g_assert_not_reached ();
+		nm_assert_not_reached ();
 	}
 
 	return !s_ip || nm_setting_ip_config_get_may_fail (s_ip);
@@ -5140,18 +5289,20 @@ check_ip_state (NMDevice *self, gboolean may_fail)
 }
 
 void
-nm_device_ip_method_failed (NMDevice *self, int family, NMDeviceStateReason reason)
+nm_device_ip_method_failed (NMDevice *self,
+                            int addr_family,
+                            NMDeviceStateReason reason)
 {
 	NMDevicePrivate *priv;
 
 	g_return_if_fail (NM_IS_DEVICE (self));
-	g_return_if_fail (family == AF_INET || family == AF_INET6);
+	g_return_if_fail (NM_IN_SET (addr_family, AF_INET, AF_INET6));
 
 	priv = NM_DEVICE_GET_PRIVATE (self);
 
-	_set_ip_state (self, family, IP_FAIL);
+	_set_ip_state (self, addr_family, IP_FAIL);
 
-	if (get_ip_config_may_fail (self, family))
+	if (get_ip_config_may_fail (self, addr_family))
 		check_ip_state (self, FALSE);
 	else
 		nm_device_state_changed (self, NM_DEVICE_STATE_FAILED, reason);
@@ -5377,8 +5528,9 @@ ipv4ll_get_ip4_config (NMDevice *self, guint32 lla)
 	route.network = htonl (0xE0000000L);
 	route.plen = 4;
 	route.rt_source = NM_IP_CONFIG_SOURCE_IP4LL;
-	route.metric = nm_device_get_ip4_route_metric (self);
-	nm_ip4_config_add_route (config, &route);
+	route.table_coerced = nm_platform_route_table_coerce (nm_device_get_route_table (self, AF_INET, TRUE));
+	route.metric = nm_device_get_route_metric (self, AF_INET);
+	nm_ip4_config_add_route (config, &route, NULL);
 
 	return config;
 }
@@ -5434,7 +5586,9 @@ nm_device_handle_ipv4ll_event (sd_ipv4ll *ll, int event, void *data)
 			nm_clear_g_source (&priv->ipv4ll_timeout);
 			nm_device_activate_schedule_ip4_config_result (self, config);
 		} else if (priv->ip4_state == IP_DONE) {
-			if (!ip4_config_merge_and_apply (self, config, TRUE)) {
+			g_clear_object (&priv->dev_ip4_config);
+			priv->dev_ip4_config = g_object_ref (config);
+			if (!ip4_config_merge_and_apply (self, TRUE)) {
 				_LOGE (LOGD_AUTOIP4, "failed to update IP4 config for autoip change.");
 				nm_device_ip_method_failed (self, AF_INET, NM_DEVICE_STATE_REASON_AUTOIP_FAILED);
 			}
@@ -5529,52 +5683,6 @@ ipv4ll_start (NMDevice *self)
 
 /*****************************************************************************/
 
-static gboolean
-_device_get_default_route_from_platform (NMDevice *self, int addr_family, NMPlatformIPRoute *out_route)
-{
-	int ifindex = nm_device_get_ip_ifindex (self);
-	const NMDedupMultiHeadEntry *pl_head_entry;
-	NMDedupMultiIter iter;
-	const NMPObject *plobj = NULL;
-	const NMPlatformIPRoute *route = NULL;
-	guint32 route_metric = G_MAXUINT32;
-
-	pl_head_entry = nm_platform_lookup_route_default (nm_device_get_platform (self),
-	                                                  addr_family == AF_INET
-	                                                    ? NMP_OBJECT_TYPE_IP4_ROUTE
-	                                                    : NMP_OBJECT_TYPE_IP6_ROUTE);
-	nmp_cache_iter_for_each (&iter, pl_head_entry, &plobj) {
-		guint32 m;
-		const NMPlatformIPRoute *r = NMP_OBJECT_CAST_IP_ROUTE (plobj);
-
-		if (   r->ifindex != ifindex
-		    || r->rt_source == NM_IP_CONFIG_SOURCE_RTPROT_KERNEL
-		    || r->table_coerced)
-			continue;
-
-		/* if there are several default routes, find the one with the best metric */
-		m = r->metric;
-		if (addr_family != AF_INET)
-			m = nm_utils_ip6_route_metric_normalize (r->metric);
-
-		if (!route || m < route_metric) {
-			route = NMP_OBJECT_CAST_IP_ROUTE (plobj);
-			route_metric = m;
-		}
-	}
-
-	if (route) {
-		if (addr_family == AF_INET)
-			*((NMPlatformIP4Route *) out_route) = *((NMPlatformIP4Route *) route);
-		else
-			*((NMPlatformIP6Route *) out_route) = *((NMPlatformIP6Route *) route);
-		return TRUE;
-	}
-	return FALSE;
-}
-
-/*****************************************************************************/
-
 static void
 ensure_con_ip4_config (NMDevice *self)
 {
@@ -5591,7 +5699,8 @@ ensure_con_ip4_config (NMDevice *self)
 	priv->con_ip4_config = _ip4_config_new (self);
 	nm_ip4_config_merge_setting (priv->con_ip4_config,
 	                             nm_connection_get_setting_ip4_config (connection),
-	                             nm_device_get_ip4_route_metric (self));
+	                             nm_device_get_route_table (self, AF_INET, TRUE),
+	                             nm_device_get_route_metric (self, AF_INET));
 
 	if (nm_device_sys_iface_state_is_external_or_assume (self)) {
 		/* For assumed connections ignore all addresses and routes. */
@@ -5616,7 +5725,8 @@ ensure_con_ip6_config (NMDevice *self)
 	priv->con_ip6_config = _ip6_config_new (self);
 	nm_ip6_config_merge_setting (priv->con_ip6_config,
 	                             nm_connection_get_setting_ip6_config (connection),
-	                             nm_device_get_ip6_route_metric (self));
+	                             nm_device_get_route_table (self, AF_INET6, TRUE),
+	                             nm_device_get_route_metric (self, AF_INET6));
 
 	if (nm_device_sys_iface_state_is_external_or_assume (self)) {
 		/* For assumed connections ignore all addresses and routes. */
@@ -5657,27 +5767,17 @@ dhcp4_cleanup (NMDevice *self, CleanupType cleanup_type, gboolean release)
 
 static gboolean
 ip4_config_merge_and_apply (NMDevice *self,
-                            NMIP4Config *config,
                             gboolean commit)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	NMConnection *connection;
 	gboolean success;
 	NMIP4Config *composite;
-	gboolean has_direct_route;
-	const guint32 default_route_metric = nm_device_get_ip4_route_metric (self);
-	guint32 gateway;
-	gboolean connection_has_default_route, connection_is_never_default;
 	gboolean ignore_auto_routes = FALSE;
 	gboolean ignore_auto_dns = FALSE;
-	gboolean auto_method = FALSE;
+	gboolean ignore_default_routes = FALSE;
 	GSList *iter;
-
-	/* Merge all the configs into the composite config */
-	if (config) {
-		g_clear_object (&priv->dev_ip4_config);
-		priv->dev_ip4_config = g_object_ref (config);
-	}
+	gs_unref_ptrarray GPtrArray *ip4_dev_route_blacklist = NULL;
 
 	/* Apply ignore-auto-routes and ignore-auto-dns settings */
 	connection = nm_device_get_applied_connection (self);
@@ -5688,9 +5788,10 @@ ip4_config_merge_and_apply (NMDevice *self,
 			ignore_auto_routes = nm_setting_ip_config_get_ignore_auto_routes (s_ip4);
 			ignore_auto_dns = nm_setting_ip_config_get_ignore_auto_dns (s_ip4);
 
-			if (nm_streq0 (nm_setting_ip_config_get_method (s_ip4),
-			               NM_SETTING_IP4_CONFIG_METHOD_AUTO))
-				auto_method = TRUE;
+			/* if the connection has an explicit gateway, we also ignore
+			 * the default routes from other sources. */
+			ignore_default_routes =    nm_setting_ip_config_get_never_default (s_ip4)
+			                        || nm_setting_ip_config_get_gateway (s_ip4);
 		}
 	}
 
@@ -5698,27 +5799,27 @@ ip4_config_merge_and_apply (NMDevice *self,
 	init_ip4_config_dns_priority (self, composite);
 
 	if (commit) {
+		if (priv->queued_ip4_config_id)
+			update_ext_ip_config (self, AF_INET, FALSE, FALSE);
 		ensure_con_ip4_config (self);
-		if (priv->queued_ip4_config_id) {
-			g_clear_object (&priv->ext_ip4_config);
-			priv->ext_ip4_config = nm_ip4_config_capture (nm_device_get_multi_index (self),
-			                                              nm_device_get_platform (self),
-			                                              nm_device_get_ip_ifindex (self),
-			                                              FALSE);
-		}
 	}
+
+	if (commit)
+		priv->default_route_metric_penalty_ip4_has = default_route_metric_penalty_detect (self);
 
 	if (priv->dev_ip4_config) {
 		nm_ip4_config_merge (composite, priv->dev_ip4_config,
 		                       (ignore_auto_routes ? NM_IP_CONFIG_MERGE_NO_ROUTES : 0)
-		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
+		                     | (ignore_default_routes ? NM_IP_CONFIG_MERGE_NO_DEFAULT_ROUTES : 0)
+		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0),
+		                     default_route_metric_penalty_get (self, AF_INET));
 	}
 
 	for (iter = priv->vpn4_configs; iter; iter = iter->next)
-		nm_ip4_config_merge (composite, iter->data, NM_IP_CONFIG_MERGE_DEFAULT);
+		nm_ip4_config_merge (composite, iter->data, NM_IP_CONFIG_MERGE_DEFAULT, 0);
 
 	if (priv->ext_ip4_config)
-		nm_ip4_config_merge (composite, priv->ext_ip4_config, NM_IP_CONFIG_MERGE_DEFAULT);
+		nm_ip4_config_merge (composite, priv->ext_ip4_config, NM_IP_CONFIG_MERGE_DEFAULT, 0);
 
 	/* Merge WWAN config *last* to ensure modem-given settings overwrite
 	 * any external stuff set by pppd or other scripts.
@@ -5726,107 +5827,23 @@ ip4_config_merge_and_apply (NMDevice *self,
 	if (priv->wwan_ip4_config) {
 		nm_ip4_config_merge (composite, priv->wwan_ip4_config,
 		                       (ignore_auto_routes ? NM_IP_CONFIG_MERGE_NO_ROUTES : 0)
-		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
+		                     | (ignore_default_routes ? NM_IP_CONFIG_MERGE_NO_DEFAULT_ROUTES : 0)
+		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0),
+		                     default_route_metric_penalty_get (self, AF_INET));
 	}
 
 	/* Merge user overrides into the composite config. For assumed connections,
 	 * con_ip4_config is empty. */
-	if (priv->con_ip4_config)
-		nm_ip4_config_merge (composite, priv->con_ip4_config, NM_IP_CONFIG_MERGE_DEFAULT);
-
-	/* Add the default route.
-	 *
-	 * We keep track of the default route of a device in a private field.
-	 * NMDevice needs to know the default route at this point, because the gateway
-	 * might require a direct route (see below).
-	 *
-	 * But also, we don't want to add the default route to priv->ip4_config,
-	 * because the default route from the setting might not be the same that
-	 * NMDefaultRouteManager eventually configures (because the it might
-	 * tweak the effective metric).
-	 */
-
-	/* unless we come to a different conclusion below, we have no default route and
-	 * the route is assumed. */
-	priv->default_route.v4_has = FALSE;
-	priv->default_route.v4_is_assumed = TRUE;
-
-	if (!commit) {
-		/* during a non-commit event, we always pickup whatever is configured. */
-		goto END_ADD_DEFAULT_ROUTE;
+	if (priv->con_ip4_config) {
+		nm_ip4_config_merge (composite, priv->con_ip4_config, NM_IP_CONFIG_MERGE_DEFAULT,
+		                     default_route_metric_penalty_get (self, AF_INET));
 	}
 
-	/* a generated-assumed connection detects the default route from the platform,
-	 * but if the IP method is automatic we need to update the default route to
-	 * maintain connectivity.
-	 */
-	if (nm_device_sys_iface_state_is_external (self) && !auto_method)
-		goto END_ADD_DEFAULT_ROUTE;
-
-	/* At this point, we treat assumed and non-assumed connections alike.
-	 * For assumed connections we do that because we still manage RA and DHCP
-	 * leases for them, so we must extend/update the default route on commits.
-	 */
-
-	connection_has_default_route
-	    = nm_default_route_manager_ip4_connection_has_default_route (nm_netns_get_default_route_manager (priv->netns),
-	                                                                 connection, &connection_is_never_default);
-
-	if (   !priv->v4_commit_first_time
-	    && connection_is_never_default) {
-		/* If the connection is explicitly configured as never-default, we enforce the (absence of the)
-		 * default-route only once. That allows the user to configure a connection as never-default,
-		 * but he can add default routes externally (via a dispatcher script) and NM will not interfere. */
-		goto END_ADD_DEFAULT_ROUTE;
-	}
-
-	/* we are about to commit (for a non-assumed connection). Enforce whatever we have
-	 * configured. */
-	priv->default_route.v4_is_assumed = FALSE;
-
-	if (!connection_has_default_route)
-		goto END_ADD_DEFAULT_ROUTE;
-
-	if (!nm_ip4_config_get_num_addresses (composite)) {
-		/* without addresses we can have no default route. */
-		goto END_ADD_DEFAULT_ROUTE;
-	}
-
-	gateway = nm_ip4_config_get_gateway (composite);
-	if (   !nm_ip4_config_has_gateway (composite)
-	    && nm_device_get_device_type (self) != NM_DEVICE_TYPE_MODEM)
-		goto END_ADD_DEFAULT_ROUTE;
-
-	has_direct_route = (   gateway == 0
-	                    || nm_ip4_config_destination_is_direct (composite, gateway, 32)
-	                    || nm_ip4_config_get_direct_route_for_host (composite, gateway));
-
-	priv->default_route.v4_has = TRUE;
-	memset (&priv->default_route.v4, 0, sizeof (priv->default_route.v4));
-	priv->default_route.v4.rt_source = NM_IP_CONFIG_SOURCE_USER;
-	priv->default_route.v4.gateway = gateway;
-	priv->default_route.v4.metric = route_metric_with_penalty (self, default_route_metric);
-	priv->default_route.v4.mss = nm_ip4_config_get_mss (composite);
-
-	if (!has_direct_route) {
-		NMPlatformIP4Route r = priv->default_route.v4;
-
-		/* add a direct route to the gateway */
-		r.network = gateway;
-		r.plen = 32;
-		r.gateway = 0;
-		nm_ip4_config_add_route (composite, &r);
-	}
-
-END_ADD_DEFAULT_ROUTE:
-
-	if (priv->default_route.v4_is_assumed) {
-		/* If above does not explicitly assign a default route, we always pick up the
-		 * default route based on what is currently configured.
-		 * That means that even managed connections with never-default, can
-		 * get a default route (if configured externally).
-		 */
-		priv->default_route.v4_has = _device_get_default_route_from_platform (self, AF_INET, (NMPlatformIPRoute *) &priv->default_route.v4);
+	if (commit) {
+		nm_ip4_config_add_dependent_routes (composite,
+		                                    nm_device_get_route_table (self, AF_INET, TRUE),
+		                                    nm_device_get_route_metric (self, AF_INET),
+		                                    &ip4_dev_route_blacklist);
 	}
 
 	if (commit) {
@@ -5834,7 +5851,7 @@ END_ADD_DEFAULT_ROUTE:
 			NM_DEVICE_GET_CLASS (self)->ip4_config_pre_commit (self, composite);
 	}
 
-	success = nm_device_set_ip4_config (self, composite, default_route_metric, commit);
+	success = nm_device_set_ip4_config (self, composite, commit, ip4_dev_route_blacklist);
 	g_object_unref (composite);
 
 	if (commit)
@@ -5845,9 +5862,14 @@ END_ADD_DEFAULT_ROUTE:
 static gboolean
 dhcp4_lease_change (NMDevice *self, NMIP4Config *config)
 {
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
 	g_return_val_if_fail (config, FALSE);
 
-	if (!ip4_config_merge_and_apply (self, config, TRUE)) {
+	g_clear_object (&priv->dev_ip4_config);
+	priv->dev_ip4_config = g_object_ref (config);
+
+	if (!ip4_config_merge_and_apply (self, TRUE)) {
 		_LOGW (LOGD_DHCP4, "failed to update IPv4 config for DHCP change.");
 		return FALSE;
 	}
@@ -5867,15 +5889,13 @@ dhcp4_restart_cb (gpointer user_data)
 {
 	NMDevice *self = user_data;
 	NMDevicePrivate *priv;
-	NMConnection *connection;
 
 	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
 
 	priv = NM_DEVICE_GET_PRIVATE (self);
 	priv->dhcp4.restart_id = 0;
-	connection = nm_device_get_applied_connection (self);
 
-	if (dhcp4_start (self, connection) == NM_ACT_STAGE_RETURN_FAILURE)
+	if (dhcp4_start (self) == NM_ACT_STAGE_RETURN_FAILURE)
 		dhcp_schedule_restart (self, AF_INET, NULL);
 
 	return FALSE;
@@ -5942,7 +5962,7 @@ dhcp4_state_changed (NMDhcpClient *client,
 	NMIP4Config *manual, **configs;
 	NMConnection *connection;
 
-	g_return_if_fail (nm_dhcp_client_get_ipv6 (client) == FALSE);
+	g_return_if_fail (nm_dhcp_client_get_addr_family (client) == AF_INET);
 	g_return_if_fail (!ip4_config || NM_IS_IP4_CONFIG (ip4_config));
 
 	_LOGD (LOGD_DHCP4, "new DHCPv4 client state %d", state);
@@ -5970,7 +5990,8 @@ dhcp4_state_changed (NMDhcpClient *client,
 			manual = _ip4_config_new (self);
 			nm_ip4_config_merge_setting (manual,
 			                             nm_connection_get_setting_ip4_config (connection),
-			                             nm_device_get_ip4_route_metric (self));
+			                             nm_device_get_route_table (self, AF_INET, TRUE),
+			                             nm_device_get_route_metric (self, AF_INET));
 
 			configs = g_new0 (NMIP4Config *, 3);
 			configs[0] = manual;
@@ -6002,36 +6023,60 @@ dhcp4_state_changed (NMDhcpClient *client,
 }
 
 static int
-dhcp4_get_timeout (NMDevice *self, NMSettingIP4Config *s_ip4)
+get_dhcp_timeout (NMDevice *self, int addr_family)
 {
-	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	gs_free char *value = NULL;
-	int timeout;
+	NMDeviceClass *klass;
+	NMConnection *connection;
+	NMSettingIPConfig *s_ip;
+	guint32 timeout;
 
-	timeout = nm_setting_ip_config_get_dhcp_timeout (NM_SETTING_IP_CONFIG (s_ip4));
+	nm_assert (NM_IS_DEVICE (self));
+	nm_assert_addr_family (addr_family);
+
+	connection = nm_device_get_applied_connection (self);
+
+	if (addr_family == AF_INET)
+		s_ip = nm_connection_get_setting_ip4_config (connection);
+	else
+		s_ip = nm_connection_get_setting_ip6_config (connection);
+
+	timeout = nm_setting_ip_config_get_dhcp_timeout (s_ip);
 	if (timeout)
 		return timeout;
 
-	value = nm_config_data_get_connection_default (NM_CONFIG_GET_DATA,
-	                                               "ipv4.dhcp-timeout",
-	                                               self);
-	timeout = _nm_utils_ascii_str_to_int64 (value, 10,
-	                                        0, G_MAXINT32, 0);
-	if (timeout)
-		return timeout;
+	{
+		gs_free char *value = NULL;
 
-	return priv->dhcp_timeout;
+		value = nm_config_data_get_connection_default (NM_CONFIG_GET_DATA,
+		                                               addr_family == AF_INET
+		                                                 ? "ipv4.dhcp-timeout"
+		                                                 : "ipv6.dhcp-timeout",
+		                                               self);
+		timeout = _nm_utils_ascii_str_to_int64 (value, 10,
+		                                        0, G_MAXINT32, 0);
+		if (timeout)
+			return timeout;
+	}
+
+	klass = NM_DEVICE_GET_CLASS (self);
+	if (klass->get_dhcp_timeout)
+		timeout = klass->get_dhcp_timeout (self, addr_family);
+
+	return timeout ?: NM_DHCP_TIMEOUT_DEFAULT;
 }
 
 static NMActStageReturn
-dhcp4_start (NMDevice *self,
-             NMConnection *connection)
+dhcp4_start (NMDevice *self)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	NMSettingIPConfig *s_ip4;
 	const guint8 *hw_addr;
 	size_t hw_addr_len = 0;
 	GByteArray *tmp = NULL;
+	NMConnection *connection;
+
+	connection = nm_device_get_applied_connection (self);
+	g_return_val_if_fail (connection, FALSE);
 
 	s_ip4 = nm_connection_get_setting_ip4_config (connection);
 
@@ -6053,12 +6098,13 @@ dhcp4_start (NMDevice *self,
 	                                                nm_device_get_ip_ifindex (self),
 	                                                tmp,
 	                                                nm_connection_get_uuid (connection),
-	                                                nm_device_get_ip4_route_metric (self),
+	                                                nm_device_get_route_table (self, AF_INET, TRUE),
+	                                                nm_device_get_route_metric (self, AF_INET),
 	                                                nm_setting_ip_config_get_dhcp_send_hostname (s_ip4),
 	                                                nm_setting_ip_config_get_dhcp_hostname (s_ip4),
 	                                                nm_setting_ip4_config_get_dhcp_fqdn (NM_SETTING_IP4_CONFIG (s_ip4)),
 	                                                nm_setting_ip4_config_get_dhcp_client_id (NM_SETTING_IP4_CONFIG (s_ip4)),
-	                                                dhcp4_get_timeout (self, NM_SETTING_IP4_CONFIG (s_ip4)),
+	                                                get_dhcp_timeout (self, AF_INET),
 	                                                priv->dhcp_anycast_address,
 	                                                NULL);
 
@@ -6086,7 +6132,6 @@ gboolean
 nm_device_dhcp4_renew (NMDevice *self, gboolean release)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	NMConnection *connection;
 
 	g_return_val_if_fail (priv->dhcp4.client != NULL, FALSE);
 
@@ -6095,11 +6140,8 @@ nm_device_dhcp4_renew (NMDevice *self, gboolean release)
 	/* Terminate old DHCP instance and release the old lease */
 	dhcp4_cleanup (self, CLEANUP_TYPE_DECONFIGURE, release);
 
-	connection = nm_device_get_applied_connection (self);
-	g_return_val_if_fail (connection, FALSE);
-
 	/* Start DHCP again on the interface */
-	return dhcp4_start (self, connection) != NM_ACT_STAGE_RETURN_FAILURE;
+	return dhcp4_start (self) != NM_ACT_STAGE_RETURN_FAILURE;
 }
 
 /*****************************************************************************/
@@ -6307,7 +6349,7 @@ act_stage3_ip4_config_start (NMDevice *self,
 
 	/* Start IPv4 addressing based on the method requested */
 	if (strcmp (method, NM_SETTING_IP4_CONFIG_METHOD_AUTO) == 0) {
-		ret = dhcp4_start (self, connection);
+		ret = dhcp4_start (self);
 		if (ret == NM_ACT_STAGE_RETURN_FAILURE)
 			NM_SET_OUT (out_failure_reason, NM_DEVICE_STATE_REASON_DHCP_START_FAILED);
 	} else if (strcmp (method, NM_SETTING_IP4_CONFIG_METHOD_LINK_LOCAL) == 0) {
@@ -6320,7 +6362,8 @@ act_stage3_ip4_config_start (NMDevice *self,
 		config = _ip4_config_new (self);
 		nm_ip4_config_merge_setting (config,
 		                             nm_connection_get_setting_ip4_config (connection),
-		                             nm_device_get_ip4_route_metric (self));
+		                             nm_device_get_route_table (self, AF_INET, TRUE),
+		                             nm_device_get_route_metric (self, AF_INET));
 
 		configs = g_new0 (NMIP4Config *, 2);
 		configs[0] = config;
@@ -6386,12 +6429,9 @@ ip6_config_merge_and_apply (NMDevice *self,
 	NMConnection *connection;
 	gboolean success;
 	NMIP6Config *composite;
-	gboolean has_direct_route;
-	const struct in6_addr *gateway;
-	gboolean connection_has_default_route, connection_is_never_default;
 	gboolean ignore_auto_routes = FALSE;
 	gboolean ignore_auto_dns = FALSE;
-	gboolean auto_method = FALSE;
+	gboolean ignore_default_routes = FALSE;
 	const char *token = NULL;
 	GSList *iter;
 
@@ -6406,13 +6446,13 @@ ip6_config_merge_and_apply (NMDevice *self,
 			ignore_auto_routes = nm_setting_ip_config_get_ignore_auto_routes (s_ip6);
 			ignore_auto_dns = nm_setting_ip_config_get_ignore_auto_dns (s_ip6);
 
+			/* if the connection has an explicit gateway, we also ignore
+			 * the default routes from other sources. */
+			ignore_default_routes =    nm_setting_ip_config_get_never_default (s_ip6)
+			                        || nm_setting_ip_config_get_gateway (s_ip6);
+
 			if (nm_setting_ip6_config_get_addr_gen_mode (ip6) == NM_SETTING_IP6_CONFIG_ADDR_GEN_MODE_EUI64)
 				token = nm_setting_ip6_config_get_token (ip6);
-
-			if (NM_IN_STRSET (nm_setting_ip_config_get_method (s_ip6),
-			                  NM_SETTING_IP6_CONFIG_METHOD_AUTO,
-			                  NM_SETTING_IP6_CONFIG_METHOD_DHCP))
-				auto_method = TRUE;
 		}
 	}
 
@@ -6424,37 +6464,35 @@ ip6_config_merge_and_apply (NMDevice *self,
 	init_ip6_config_dns_priority (self, composite);
 
 	if (commit) {
+		if (priv->queued_ip6_config_id)
+			update_ext_ip_config (self, AF_INET6, FALSE, FALSE);
 		ensure_con_ip6_config (self);
-		if (priv->queued_ip6_config_id) {
-			g_clear_object (&priv->ext_ip6_config);
-			g_clear_object (&priv->ext_ip6_config_captured);
-			priv->ext_ip6_config_captured = nm_ip6_config_capture (nm_device_get_multi_index (self),
-			                                                       nm_device_get_platform (self),
-			                                                       nm_device_get_ip_ifindex (self),
-			                                                       FALSE,
-			                                                       NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN);
-			if (priv->ext_ip6_config_captured)
-				priv->ext_ip6_config = nm_ip6_config_new_cloned (priv->ext_ip6_config_captured);
-		}
 	}
+
+	if (commit)
+		priv->default_route_metric_penalty_ip6_has = default_route_metric_penalty_detect (self);
 
 	/* Merge all the IP configs into the composite config */
 	if (priv->ac_ip6_config) {
 		nm_ip6_config_merge (composite, priv->ac_ip6_config,
 		                       (ignore_auto_routes ? NM_IP_CONFIG_MERGE_NO_ROUTES : 0)
-		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
+		                     | (ignore_default_routes ? NM_IP_CONFIG_MERGE_NO_DEFAULT_ROUTES : 0)
+		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0),
+		                     default_route_metric_penalty_get (self, AF_INET6));
 	}
 	if (priv->dhcp6.ip6_config) {
 		nm_ip6_config_merge (composite, priv->dhcp6.ip6_config,
 		                       (ignore_auto_routes ? NM_IP_CONFIG_MERGE_NO_ROUTES : 0)
-		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
+		                     | (ignore_default_routes ? NM_IP_CONFIG_MERGE_NO_DEFAULT_ROUTES : 0)
+		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0),
+		                     default_route_metric_penalty_get (self, AF_INET6));
 	}
 
 	for (iter = priv->vpn6_configs; iter; iter = iter->next)
-		nm_ip6_config_merge (composite, iter->data, NM_IP_CONFIG_MERGE_DEFAULT);
+		nm_ip6_config_merge (composite, iter->data, NM_IP_CONFIG_MERGE_DEFAULT, 0);
 
 	if (priv->ext_ip6_config)
-		nm_ip6_config_merge (composite, priv->ext_ip6_config, NM_IP_CONFIG_MERGE_DEFAULT);
+		nm_ip6_config_merge (composite, priv->ext_ip6_config, NM_IP_CONFIG_MERGE_DEFAULT, 0);
 
 	/* Merge WWAN config *last* to ensure modem-given settings overwrite
 	 * any external stuff set by pppd or other scripts.
@@ -6462,108 +6500,34 @@ ip6_config_merge_and_apply (NMDevice *self,
 	if (priv->wwan_ip6_config) {
 		nm_ip6_config_merge (composite, priv->wwan_ip6_config,
 		                       (ignore_auto_routes ? NM_IP_CONFIG_MERGE_NO_ROUTES : 0)
-		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0));
+		                     | (ignore_default_routes ? NM_IP_CONFIG_MERGE_NO_DEFAULT_ROUTES : 0)
+		                     | (ignore_auto_dns ? NM_IP_CONFIG_MERGE_NO_DNS : 0),
+		                     default_route_metric_penalty_get (self, AF_INET6));
+	}
+
+	if (priv->rt6_temporary_not_available) {
+		const NMPObject *o;
+		GHashTableIter hiter;
+
+		g_hash_table_iter_init (&hiter, priv->rt6_temporary_not_available);
+		while (g_hash_table_iter_next (&hiter, (gpointer *) &o, NULL)) {
+			nm_ip6_config_add_route (composite,
+			                         NMP_OBJECT_CAST_IP6_ROUTE (o),
+			                         NULL);
+		}
 	}
 
 	/* Merge user overrides into the composite config. For assumed connections,
 	 * con_ip6_config is empty. */
-	if (priv->con_ip6_config)
-		nm_ip6_config_merge (composite, priv->con_ip6_config, NM_IP_CONFIG_MERGE_DEFAULT);
-
-	/* Add the default route.
-	 *
-	 * We keep track of the default route of a device in a private field.
-	 * NMDevice needs to know the default route at this point, because the gateway
-	 * might require a direct route (see below).
-	 *
-	 * But also, we don't want to add the default route to priv->ip6_config,
-	 * because the default route from the setting might not be the same that
-	 * NMDefaultRouteManager eventually configures (because the it might
-	 * tweak the effective metric).
-	 */
-
-	/* unless we come to a different conclusion below, we have no default route and
-	 * the route is assumed. */
-	priv->default_route.v6_has = FALSE;
-	priv->default_route.v6_is_assumed = TRUE;
-
-	if (!commit) {
-		/* during a non-commit event, we always pickup whatever is configured. */
-		goto END_ADD_DEFAULT_ROUTE;
+	if (priv->con_ip6_config) {
+		nm_ip6_config_merge (composite, priv->con_ip6_config, NM_IP_CONFIG_MERGE_DEFAULT,
+		                     default_route_metric_penalty_get (self, AF_INET6));
 	}
 
-	/* a generated-assumed connection detects the default route from the platform,
-	 * but if the IP method is automatic we need to update the default route to
-	 * maintain connectivity.
-	 */
-	if (nm_device_sys_iface_state_is_external (self) && !auto_method)
-		goto END_ADD_DEFAULT_ROUTE;
-
-	/* At this point, we treat assumed and non-assumed connections alike.
-	 * For assumed connections we do that because we still manage RA and DHCP
-	 * leases for them, so we must extend/update the default route on commits.
-	 */
-
-	connection_has_default_route
-	    = nm_default_route_manager_ip6_connection_has_default_route (nm_netns_get_default_route_manager (priv->netns),
-	                                                                 connection, &connection_is_never_default);
-
-	if (   !priv->v6_commit_first_time
-	    && connection_is_never_default) {
-		/* If the connection is explicitly configured as never-default, we enforce the (absence of the)
-		 * default-route only once. That allows the user to configure a connection as never-default,
-		 * but he can add default routes externally (via a dispatcher script) and NM will not interfere. */
-		goto END_ADD_DEFAULT_ROUTE;
-	}
-
-	/* we are about to commit (for a non-assumed connection). Enforce whatever we have
-	 * configured. */
-	priv->default_route.v6_is_assumed = FALSE;
-
-	if (!connection_has_default_route)
-		goto END_ADD_DEFAULT_ROUTE;
-
-	if (!nm_ip6_config_get_num_addresses (composite)) {
-		/* without addresses we can have no default route. */
-		goto END_ADD_DEFAULT_ROUTE;
-	}
-
-	gateway = nm_ip6_config_get_gateway (composite);
-	if (!gateway)
-		goto END_ADD_DEFAULT_ROUTE;
-
-
-	has_direct_route = nm_ip6_config_get_direct_route_for_host (composite, gateway) != NULL;
-
-
-
-	priv->default_route.v6_has = TRUE;
-	memset (&priv->default_route.v6, 0, sizeof (priv->default_route.v6));
-	priv->default_route.v6.rt_source = NM_IP_CONFIG_SOURCE_USER;
-	priv->default_route.v6.gateway = *gateway;
-	priv->default_route.v6.metric = route_metric_with_penalty (self,
-	                                                           nm_device_get_ip6_route_metric (self));
-	priv->default_route.v6.mss = nm_ip6_config_get_mss (composite);
-
-	if (!has_direct_route) {
-		NMPlatformIP6Route r = priv->default_route.v6;
-
-		/* add a direct route to the gateway */
-		r.network = *gateway;
-		r.plen = 128;
-		r.gateway = in6addr_any;
-		nm_ip6_config_add_route (composite, &r);
-	}
-
-END_ADD_DEFAULT_ROUTE:
-
-	if (priv->default_route.v6_is_assumed) {
-		/* If above does not explicitly assign a default route, we always pick up the
-		 * default route based on what is currently configured.
-		 * That means that even managed connections with never-default, can
-		 * get a default route (if configured externally).
-		 */
-		priv->default_route.v6_has = _device_get_default_route_from_platform (self, AF_INET6, (NMPlatformIPRoute *) &priv->default_route.v6);
+	if (commit) {
+		nm_ip6_config_add_dependent_routes (composite,
+		                                    nm_device_get_route_table (self, AF_INET6, TRUE),
+		                                    nm_device_get_route_metric (self, AF_INET6));
 	}
 
 	/* Allow setting MTU etc */
@@ -6634,28 +6598,30 @@ dhcp6_restart_cb (gpointer user_data)
 }
 
 static void
-dhcp_schedule_restart (NMDevice *self, int family, const char *reason)
+dhcp_schedule_restart (NMDevice *self,
+                       int addr_family,
+                       const char *reason)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	gboolean inet4;
 	guint tries_left;
-	gs_free char *tries_str = NULL;
+	char tries_str[255];
 
-	g_return_if_fail (family == AF_INET || family == AF_INET6);
-	inet4 = family == AF_INET;
+	nm_assert_addr_family (addr_family);
 
-	tries_left = inet4 ? priv->dhcp4.num_tries_left : priv->dhcp6.num_tries_left;
-	if (tries_left != DHCP_NUM_TRIES_MAX)
-		tries_str = g_strdup_printf (", %u tries left", tries_left + 1);
+	tries_left =   (addr_family == AF_INET)
+	             ? priv->dhcp4.num_tries_left
+	             : priv->dhcp6.num_tries_left;
 
-	_LOGI (inet4 ? LOGD_DHCP4 : LOGD_DHCP6,
+	_LOGI ((addr_family == AF_INET) ? LOGD_DHCP4 : LOGD_DHCP6,
 	       "scheduling DHCPv%c restart in %u seconds%s%s%s%s",
-	       inet4 ? '4' : '6',
+	       nm_utils_addr_family_to_char (addr_family),
 	       DHCP_RESTART_TIMEOUT,
-	       tries_str ? tries_str : "",
+	       (tries_left != DHCP_NUM_TRIES_MAX)
+	         ? nm_sprintf_buf (tries_str, ", %u tries left", tries_left + 1)
+	         : "",
 	       NM_PRINT_FMT_QUOTED (reason, " (reason: ", reason, ")", ""));
 
-	if (inet4) {
+	if (addr_family == AF_INET) {
 		priv->dhcp4.restart_id = g_timeout_add_seconds (DHCP_RESTART_TIMEOUT,
 		                                                dhcp4_restart_cb, self);
 	} else {
@@ -6733,7 +6699,7 @@ dhcp6_state_changed (NMDhcpClient *client,
 	NMDevice *self = NM_DEVICE (user_data);
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
-	g_return_if_fail (nm_dhcp_client_get_ipv6 (client) == TRUE);
+	g_return_if_fail (nm_dhcp_client_get_addr_family (client) == AF_INET6);
 	g_return_if_fail (!ip6_config || NM_IS_IP6_CONFIG (ip6_config));
 
 	_LOGD (LOGD_DHCP6, "new DHCPv6 client state %d", state);
@@ -6848,10 +6814,11 @@ dhcp6_start_with_link_ready (NMDevice *self, NMConnection *connection)
 	                                                tmp,
 	                                                &ll_addr->address,
 	                                                nm_connection_get_uuid (connection),
-	                                                nm_device_get_ip6_route_metric (self),
+	                                                nm_device_get_route_table (self, AF_INET6, TRUE),
+	                                                nm_device_get_route_metric (self, AF_INET6),
 	                                                nm_setting_ip_config_get_dhcp_send_hostname (s_ip6),
 	                                                nm_setting_ip_config_get_dhcp_hostname (s_ip6),
-	                                                priv->dhcp_timeout,
+	                                                get_dhcp_timeout (self, AF_INET6),
 	                                                priv->dhcp_anycast_address,
 	                                                (priv->dhcp6.mode == NM_NDISC_DHCP_LEVEL_OTHERCONF) ? TRUE : FALSE,
 	                                                nm_setting_ip6_config_get_ip6_privacy (NM_SETTING_IP6_CONFIG (s_ip6)),
@@ -6871,7 +6838,7 @@ dhcp6_start_with_link_ready (NMDevice *self, NMConnection *connection)
 	}
 
 	if (nm_device_sys_iface_state_is_external_or_assume (self))
-		priv->dhcp4.was_active = TRUE;
+		priv->dhcp6.was_active = TRUE;
 
 	return !!priv->dhcp6.client;
 }
@@ -7252,6 +7219,26 @@ nm_device_get_configured_mtu_for_wired (NMDevice *self, gboolean *out_is_user_co
 /*****************************************************************************/
 
 static void
+_set_mtu (NMDevice *self, guint32 mtu)
+{
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
+	if (priv->mtu == mtu)
+		return;
+
+	priv->mtu = mtu;
+	_notify (self, PROP_MTU);
+
+	if (priv->master) {
+		/* changing the MTU of a slave, might require the master to reset
+		 * it's MTU. Note that the master usually cannot set a MTU larger
+		 * then the slave's. Hence, when the slave increases the MTU,
+		 * master might want to retry setting the MTU. */
+		nm_device_commit_mtu (priv->master);
+	}
+}
+
+static void
 _commit_mtu (NMDevice *self, const NMIP4Config *config)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
@@ -7270,8 +7257,7 @@ _commit_mtu (NMDevice *self, const NMIP4Config *config)
 		return;
 
 	if (nm_device_sys_iface_state_is_external_or_assume (self)) {
-		/* for assumed connections we don't tamper with the MTU. This is
-		 * a bug and supposed to be fixed by the unmanaged/assumed rework. */
+		/* for assumed connections we don't tamper with the MTU. */
 		return;
 	}
 
@@ -7371,6 +7357,7 @@ _commit_mtu (NMDevice *self, const NMIP4Config *config)
 	})
 	if (   (mtu_desired && mtu_desired != mtu_plat)
 	    || (ip6_mtu && ip6_mtu != _IP6_MTU_SYS ())) {
+		gboolean anticipated_failure = FALSE;
 
 		if (!priv->mtu_initial && !priv->ip6_mtu_initial) {
 			/* before touching any of the MTU paramters, record the
@@ -7380,17 +7367,50 @@ _commit_mtu (NMDevice *self, const NMIP4Config *config)
 		}
 
 		if (mtu_desired && mtu_desired != mtu_plat) {
-			nm_platform_link_set_mtu (nm_device_get_platform (self), ifindex, mtu_desired);
+			if (nm_platform_link_set_mtu (nm_device_get_platform (self), ifindex, mtu_desired) == NM_PLATFORM_ERROR_CANT_SET_MTU) {
+				anticipated_failure = TRUE;
+				_LOGW (LOGD_DEVICE, "mtu: failure to set MTU. %s",
+				       NM_IS_DEVICE_VLAN (self)
+				         ? "Is the parent's MTU size large enough?"
+				         : (!c_list_is_empty (&priv->slaves)
+				              ? "Are the MTU sizes of the slaves large enough?"
+				              : "Did you configure the MTU correctly?"));
+			}
 			priv->carrier_wait_until_ms = nm_utils_get_monotonic_timestamp_ms () + CARRIER_WAIT_TIME_AFTER_MTU_MS;
 		}
 
 		if (ip6_mtu && ip6_mtu != _IP6_MTU_SYS ()) {
-			nm_device_ipv6_sysctl_set (self, "mtu",
-			                           nm_sprintf_buf (sbuf, "%u", (unsigned) ip6_mtu));
+			if (!nm_device_ipv6_sysctl_set (self, "mtu",
+			                                nm_sprintf_buf (sbuf, "%u", (unsigned) ip6_mtu))) {
+				int errsv = errno;
+
+				_NMLOG (anticipated_failure && errsv == EINVAL ? LOGL_DEBUG : LOGL_WARN,
+				        LOGD_DEVICE,
+				        "mtu: failure to set IPv6 MTU%s",
+				        anticipated_failure && errsv == EINVAL
+				           ? ": Is the underlying MTU value successfully set?"
+				           : "");
+			}
 			priv->carrier_wait_until_ms = nm_utils_get_monotonic_timestamp_ms () + CARRIER_WAIT_TIME_AFTER_MTU_MS;
 		}
 	}
 #undef _IP6_MTU_SYS
+}
+
+void
+nm_device_commit_mtu (NMDevice *self)
+{
+	NMDeviceState state;
+
+	g_return_if_fail (NM_IS_DEVICE (self));
+
+	state = nm_device_get_state (self);
+	if (   state >= NM_DEVICE_STATE_CONFIG
+	    && state < NM_DEVICE_STATE_DEACTIVATING) {
+		_LOGT (LOGD_DEVICE, "mtu: commit-mtu...");
+		_commit_mtu (self, NM_DEVICE_GET_PRIVATE (self)->ip4_config);
+	} else
+		_LOGT (LOGD_DEVICE, "mtu: commit-mtu... skip due to state %s", nm_device_state_to_str (state));
 }
 
 static void
@@ -7405,14 +7425,6 @@ ndisc_config_changed (NMNDisc *ndisc, const NMNDiscData *rdata, guint changed_in
 	if (!priv->ac_ip6_config)
 		priv->ac_ip6_config = _ip6_config_new (self);
 
-	if (changed & NM_NDISC_CONFIG_GATEWAYS) {
-		/* Use the first gateway as ordered in neighbor discovery cache. */
-		if (rdata->gateways_n)
-			nm_ip6_config_set_gateway (priv->ac_ip6_config, &rdata->gateways[0].address);
-		else
-			nm_ip6_config_set_gateway (priv->ac_ip6_config, NULL);
-	}
-
 	if (changed & NM_NDISC_CONFIG_ADDRESSES) {
 		guint8 plen;
 		guint32 ifa_flags;
@@ -7422,7 +7434,8 @@ ndisc_config_changed (NMNDisc *ndisc, const NMNDiscData *rdata, guint changed_in
 		 * addresses as /128. The reason for the /128 is to prevent the kernel
 		 * from adding a prefix route for this address. */
 		ifa_flags = 0;
-		if (nm_platform_check_support_kernel_extended_ifa_flags (nm_device_get_platform (self))) {
+		if (nm_platform_check_kernel_support (nm_device_get_platform (self),
+		                                      NM_PLATFORM_KERNEL_SUPPORT_EXTENDED_IFA_FLAGS)) {
 			ifa_flags |= IFA_F_NOPREFIXROUTE;
 			if (NM_IN_SET (priv->ndisc_use_tempaddr, NM_SETTING_IP6_CONFIG_PRIVACY_PREFER_TEMP_ADDR,
 			                                         NM_SETTING_IP6_CONFIG_PRIVACY_PREFER_PUBLIC_ADDR))
@@ -7438,11 +7451,17 @@ ndisc_config_changed (NMNDisc *ndisc, const NMNDiscData *rdata, guint changed_in
 		                                     ifa_flags);
 	}
 
-	if (changed & NM_NDISC_CONFIG_ROUTES) {
+	if (NM_FLAGS_ANY (changed,   NM_NDISC_CONFIG_ROUTES
+	                           | NM_NDISC_CONFIG_GATEWAYS)) {
 		nm_ip6_config_reset_routes_ndisc (priv->ac_ip6_config,
+		                                  rdata->gateways,
+		                                  rdata->gateways_n,
 		                                  rdata->routes,
 		                                  rdata->routes_n,
-		                                  nm_device_get_ip6_route_metric (self));
+		                                  nm_device_get_route_table (self, AF_INET6, TRUE),
+		                                  nm_device_get_route_metric (self, AF_INET6),
+		                                  nm_platform_check_kernel_support (nm_device_get_platform (self),
+		                                                                    NM_PLATFORM_KERNEL_SUPPORT_RTA_PREF));
 	}
 
 	if (changed & NM_NDISC_CONFIG_DNS_SERVERS) {
@@ -7535,8 +7554,10 @@ addrconf6_start_with_link_ready (NMDevice *self)
 	}
 
 	/* Apply any manual configuration before starting RA */
-	if (!ip6_config_merge_and_apply (self, TRUE))
+	if (!ip6_config_merge_and_apply (self, TRUE)) {
 		_LOGW (LOGD_IP6, "failed to apply manual IPv6 configuration");
+		g_clear_object (&priv->con_ip6_config);
+	}
 
 	/* XXX: These sysctls would probably be better set by the lndp ndisc itself. */
 	switch (nm_ndisc_get_node_type (priv->ndisc)) {
@@ -7607,6 +7628,9 @@ addrconf6_start (NMDevice *self, NMSettingIP6ConfigPrivacy use_tempaddr)
 		priv->ac_ip6_config = NULL;
 	}
 
+	g_clear_pointer (&priv->rt6_temporary_not_available, g_hash_table_unref);
+	nm_clear_g_source (&priv->rt6_temporary_not_available_id);
+
 	s_ip6 = NM_SETTING_IP6_CONFIG (nm_connection_get_setting_ip6_config (connection));
 	g_assert (s_ip6);
 
@@ -7629,7 +7653,8 @@ addrconf6_start (NMDevice *self, NMSettingIP6ConfigPrivacy use_tempaddr)
 	priv->ndisc_use_tempaddr = use_tempaddr;
 
 	if (   NM_IN_SET (use_tempaddr, NM_SETTING_IP6_CONFIG_PRIVACY_PREFER_TEMP_ADDR, NM_SETTING_IP6_CONFIG_PRIVACY_PREFER_PUBLIC_ADDR)
-	    && !nm_platform_check_support_kernel_extended_ifa_flags (nm_device_get_platform (self))) {
+	    && !nm_platform_check_kernel_support (nm_device_get_platform (self),
+	                                          NM_PLATFORM_KERNEL_SUPPORT_EXTENDED_IFA_FLAGS)) {
 		_LOGW (LOGD_IP6, "The kernel does not support extended IFA_FLAGS needed by NM for "
 		                 "IPv6 private addresses. This feature is not available");
 	}
@@ -7660,6 +7685,8 @@ addrconf6_cleanup (NMDevice *self)
 	nm_device_remove_pending_action (self, NM_PENDING_ACTION_AUTOCONF6, FALSE);
 
 	g_clear_object (&priv->ac_ip6_config);
+	g_clear_pointer (&priv->rt6_temporary_not_available, g_hash_table_unref);
+	nm_clear_g_source (&priv->rt6_temporary_not_available_id);
 	g_clear_object (&priv->ndisc);
 }
 
@@ -7687,7 +7714,9 @@ save_ip6_properties (NMDevice *self)
 	g_hash_table_remove_all (priv->ip6_saved_properties);
 
 	for (i = 0; i < G_N_ELEMENTS (ip6_properties_to_save); i++) {
-		value = nm_platform_sysctl_get (nm_device_get_platform (self), NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip6_property_path (ifname, ip6_properties_to_save[i])));
+		char buf[NM_UTILS_SYSCTL_IP_CONF_PATH_BUFSIZE];
+
+		value = nm_platform_sysctl_get (nm_device_get_platform (self), NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET6, buf, ifname, ip6_properties_to_save[i])));
 		if (value) {
 			g_hash_table_insert (priv->ip6_saved_properties,
 			                     (char *) ip6_properties_to_save[i],
@@ -7727,7 +7756,8 @@ set_nm_ipv6ll (NMDevice *self, gboolean enable)
 	int ifindex = nm_device_get_ip_ifindex (self);
 	char *value;
 
-	if (!nm_platform_check_support_user_ipv6ll (nm_device_get_platform (self)))
+	if (!nm_platform_check_kernel_support (nm_device_get_platform (self),
+	                                       NM_PLATFORM_KERNEL_SUPPORT_USER_IPV6LL))
 		return;
 
 	priv->nm_ipv6ll = enable;
@@ -7746,9 +7776,11 @@ set_nm_ipv6ll (NMDevice *self, gboolean enable)
 		}
 
 		if (enable) {
+			char buf[NM_UTILS_SYSCTL_IP_CONF_PATH_BUFSIZE];
+
 			/* Bounce IPv6 to ensure the kernel stops IPv6LL address generation */
 			value = nm_platform_sysctl_get (nm_device_get_platform (self),
-			                                NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_ip6_property_path (nm_device_get_ip_iface (self), "disable_ipv6")));
+			                                NMP_SYSCTL_PATHID_ABSOLUTE (nm_utils_sysctl_ip_conf_path (AF_INET6, buf, nm_device_get_ip_iface (self), "disable_ipv6")));
 			if (g_strcmp0 (value, "0") == 0)
 				nm_device_ipv6_sysctl_set (self, "disable_ipv6", "1");
 			g_free (value);
@@ -7874,7 +7906,8 @@ act_stage3_ip6_config_start (NMDevice *self,
 	method = nm_utils_get_ip_config_method (connection, NM_TYPE_SETTING_IP6_CONFIG);
 
 	if (strcmp (method, NM_SETTING_IP6_CONFIG_METHOD_IGNORE) == 0) {
-		if (!priv->master) {
+		if (   !priv->master
+		    && !nm_device_sys_iface_state_is_external (self)) {
 			gboolean old_nm_ipv6ll = priv->nm_ipv6ll;
 
 			/* When activating an IPv6 'ignore' connection we need to revert back
@@ -8073,6 +8106,9 @@ activate_stage3_ip_config_start (NMDevice *self)
 
 	_set_ip_state (self, AF_INET, IP_WAIT);
 	_set_ip_state (self, AF_INET6, IP_WAIT);
+
+	_active_connection_set_state_flags (self,
+	                                    NM_ACTIVATION_STATE_FLAG_LAYER2_READY);
 
 	nm_device_state_changed (self, NM_DEVICE_STATE_IP_CONFIG, NM_DEVICE_STATE_REASON_NONE);
 
@@ -8385,7 +8421,7 @@ start_sharing (NMDevice *self, NMIP4Config *config)
 	if (!ip4_addr || !ip4_addr->address)
 		return FALSE;
 
-	netmask = nm_utils_ip4_prefix_to_netmask (ip4_addr->plen);
+	netmask = _nm_utils_ip4_prefix_to_netmask (ip4_addr->plen);
 	if (!inet_ntop (AF_INET, &netmask, str_mask, sizeof (str_mask)))
 		return FALSE;
 
@@ -8507,7 +8543,7 @@ activate_stage5_ip4_config_result (NMDevice *self)
 	}
 
 	/* NULL to use the existing priv->dev_ip4_config */
-	if (!ip4_config_merge_and_apply (self, NULL, TRUE)) {
+	if (!ip4_config_merge_and_apply (self, TRUE)) {
 		_LOGD (LOGD_DEVICE | LOGD_IP4, "Activation: Stage 5 of 5 (IPv4 Commit) failed");
 		nm_device_ip_method_failed (self, AF_INET, NM_DEVICE_STATE_REASON_CONFIG_FAILED);
 		return;
@@ -8968,7 +9004,7 @@ _nm_device_hash_check_invalid_keys (GHashTable *hash, const char *setting_name,
 #if NM_MORE_ASSERTS > 10
 	/* Assert that the keys are unique. */
 	{
-		gs_unref_hashtable GHashTable *check_dups = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, NULL);
+		gs_unref_hashtable GHashTable *check_dups = g_hash_table_new_full (nm_str_hash, g_str_equal, NULL, NULL);
 
 		for (i = 0; argv[i]; i++) {
 			if (!nm_g_hash_table_add (check_dups, (char *) argv[i]))
@@ -9037,7 +9073,8 @@ nm_device_reactivate_ip4_config (NMDevice *self,
 		priv->con_ip4_config = _ip4_config_new (self);
 		nm_ip4_config_merge_setting (priv->con_ip4_config,
 		                             s_ip4_new,
-		                             nm_device_get_ip4_route_metric (self));
+		                             nm_device_get_route_table (self, AF_INET, TRUE),
+		                             nm_device_get_route_metric (self, AF_INET));
 
 		if (!force_restart) {
 			method_old = s_ip4_old
@@ -9055,7 +9092,7 @@ nm_device_reactivate_ip4_config (NMDevice *self,
 			if (!nm_device_activate_stage3_ip4_start (self))
 				_LOGW (LOGD_IP4, "Failed to apply IPv4 configuration");
 		} else {
-			if (!ip4_config_merge_and_apply (self, NULL, TRUE))
+			if (!ip4_config_merge_and_apply (self, TRUE))
 				_LOGW (LOGD_IP4, "Failed to reapply IPv4 configuration");
 		}
 	}
@@ -9079,7 +9116,8 @@ nm_device_reactivate_ip6_config (NMDevice *self,
 		priv->con_ip6_config = _ip6_config_new (self);
 		nm_ip6_config_merge_setting (priv->con_ip6_config,
 		                             s_ip6_new,
-		                             nm_device_get_ip6_route_metric (self));
+		                             nm_device_get_route_table (self, AF_INET6, TRUE),
+		                             nm_device_get_route_metric (self, AF_INET6));
 
 		if (!force_restart) {
 			method_old = s_ip6_old
@@ -9159,7 +9197,27 @@ can_reapply_change (NMDevice *self, const char *setting_name,
 	                         NM_SETTING_IP4_CONFIG_SETTING_NAME,
 	                         NM_SETTING_IP6_CONFIG_SETTING_NAME,
 	                         NM_SETTING_PROXY_SETTING_NAME)) {
-		/* accept all */
+		if (g_hash_table_contains (diffs, NM_SETTING_IP_CONFIG_ROUTE_TABLE)) {
+			/* changing the route-table setting is complicated, because it affects
+			 * how we sync the routes. Don't support changing it without full
+			 * re-activation.
+			 *
+			 * The problem is really that changing the setting also affects the sync
+			 * mode. So, switching from NM_IP_ROUTE_TABLE_SYNC_MODE_MAIN to
+			 * NM_IP_ROUTE_TABLE_SYNC_MODE_FULL would somehow require us to get rid
+			 * of additional routes, but we don't know which routes were added by NM
+			 * and which should be removed.
+			 *
+			 * Note how nm_device_get_route_table() caches the value for the duration of the
+			 * activation. */
+			g_set_error (error,
+			             NM_DEVICE_ERROR,
+			             NM_DEVICE_ERROR_INCOMPATIBLE_CONNECTION,
+			             "Can't reapply changes to '%s.%s' setting",
+			             setting_name,
+			             NM_SETTING_IP_CONFIG_ROUTE_TABLE);
+			return FALSE;
+		}
 		return TRUE;
 	} else {
 		g_set_error (error,
@@ -9547,6 +9605,97 @@ impl_device_get_applied_connection (NMDevice *self,
 
 /*****************************************************************************/
 
+typedef struct {
+	gint64 timestamp_ms;
+	bool dirty;
+} IP6RoutesTemporaryNotAvailableData;
+
+static gboolean
+_rt6_temporary_not_available_timeout (gpointer user_data)
+{
+	NMDevice *self = NM_DEVICE (user_data);
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
+	priv->rt6_temporary_not_available_id = 0;
+	nm_device_activate_schedule_ip6_config_result (self);
+
+	return G_SOURCE_REMOVE;
+}
+
+static gboolean
+_rt6_temporary_not_available_set (NMDevice *self,
+                                  GPtrArray *temporary_not_available)
+{
+	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+	IP6RoutesTemporaryNotAvailableData *data;
+	GHashTableIter iter;
+	gint64 now_ms, oldest_ms;
+	const gint64 MAX_AGE_MS = 20000;
+	guint i;
+	gboolean success = TRUE;
+
+	if (   !temporary_not_available
+	    || !temporary_not_available->len) {
+		/* nothing outstanding. Clear tracking the routes. */
+		g_clear_pointer (&priv->rt6_temporary_not_available, g_hash_table_unref);
+		nm_clear_g_source (&priv->rt6_temporary_not_available_id);
+		return success;
+	}
+
+	if (priv->rt6_temporary_not_available) {
+		g_hash_table_iter_init (&iter, priv->rt6_temporary_not_available);
+		while (g_hash_table_iter_next (&iter, NULL, (gpointer *) &data))
+			data->dirty = TRUE;
+	} else {
+		priv->rt6_temporary_not_available = g_hash_table_new_full ((GHashFunc) nmp_object_id_hash,
+		                                                           (GEqualFunc) nmp_object_id_equal,
+		                                                           (GDestroyNotify) nmp_object_unref,
+		                                                           nm_g_slice_free_fcn (IP6RoutesTemporaryNotAvailableData));
+	}
+
+	now_ms = nm_utils_get_monotonic_timestamp_ms ();
+	oldest_ms = now_ms;
+
+	for (i = 0; i < temporary_not_available->len; i++) {
+		const NMPObject *o = temporary_not_available->pdata[i];
+
+		data = g_hash_table_lookup (priv->rt6_temporary_not_available, o);
+		if (data) {
+			if (!data->dirty)
+				continue;
+			data->dirty = FALSE;
+			nm_assert (data->timestamp_ms > 0 && data->timestamp_ms <= now_ms);
+			if (now_ms > data->timestamp_ms + MAX_AGE_MS) {
+				/* timeout. Could not add this address. */
+				_LOGW (LOGD_DEVICE, "failure to add IPv6 route: %s",
+				       nmp_object_to_string (o, NMP_OBJECT_TO_STRING_PUBLIC, NULL, 0));
+				success = FALSE;
+			} else
+				oldest_ms = MIN (data->timestamp_ms, oldest_ms);
+			continue;
+		}
+
+		data = g_slice_new0 (IP6RoutesTemporaryNotAvailableData);
+		data->timestamp_ms = now_ms;
+		g_hash_table_insert (priv->rt6_temporary_not_available, (gpointer) nmp_object_ref (o), data);
+	}
+
+	g_hash_table_iter_init (&iter, priv->rt6_temporary_not_available);
+	while (g_hash_table_iter_next (&iter, NULL, (gpointer *) &data)) {
+		if (data->dirty)
+			g_hash_table_iter_remove (&iter);
+	}
+
+	nm_clear_g_source (&priv->rt6_temporary_not_available_id);
+	priv->rt6_temporary_not_available_id = g_timeout_add (oldest_ms + MAX_AGE_MS - now_ms,
+	                                                      _rt6_temporary_not_available_timeout,
+	                                                      self);
+
+	return success;
+}
+
+/*****************************************************************************/
+
 static void
 disconnect_cb (NMDevice *self,
                GDBusMethodInvocation *context,
@@ -9898,14 +10047,13 @@ nm_device_get_ip4_config (NMDevice *self)
 static gboolean
 nm_device_set_ip4_config (NMDevice *self,
                           NMIP4Config *new_config,
-                          guint32 default_route_metric,
-                          gboolean commit)
+                          gboolean commit,
+                          GPtrArray *ip4_dev_route_blacklist)
 {
 	NMDevicePrivate *priv;
 	NMIP4Config *old_config = NULL;
 	gboolean has_changes = FALSE;
 	gboolean success = TRUE;
-	gboolean def_route_changed;
 	int ip_ifindex = 0;
 
 	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
@@ -9927,7 +10075,12 @@ nm_device_set_ip4_config (NMDevice *self,
 		_commit_mtu (self, new_config);
 		success = nm_ip4_config_commit (new_config,
 		                                nm_device_get_platform (self),
-		                                default_route_metric);
+		                                nm_device_get_route_table (self, AF_INET, FALSE)
+		                                  ? NM_IP_ROUTE_TABLE_SYNC_MODE_FULL
+		                                  : NM_IP_ROUTE_TABLE_SYNC_MODE_MAIN);
+		nm_platform_ip4_dev_route_blacklist_set (nm_device_get_platform (self),
+		                                         nm_ip4_config_get_ifindex (new_config),
+		                                         ip4_dev_route_blacklist);
 	}
 
 	if (new_config) {
@@ -9958,7 +10111,6 @@ nm_device_set_ip4_config (NMDevice *self,
 		g_clear_object (&priv->dev_ip4_config);
 	}
 
-	def_route_changed = nm_default_route_manager_ip4_update_default_route (nm_netns_get_default_route_manager (priv->netns), self);
 	concheck_periodic_update (self);
 
 	if (!nm_device_sys_iface_state_is_external_or_assume (self))
@@ -9992,9 +10144,6 @@ nm_device_set_ip4_config (NMDevice *self,
 		}
 
 		nm_device_queue_recheck_assume (self);
-	} else if (def_route_changed) {
-		_LOGD (LOGD_IP4, "ip4-config: default route changed");
-		g_signal_emit (self, signals[IP4_CONFIG_CHANGED], 0, priv->ip4_config, priv->ip4_config);
 	}
 
 	return success;
@@ -10038,11 +10187,16 @@ nm_device_replace_vpn4_config (NMDevice *self, NMIP4Config *old, NMIP4Config *co
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
+	nm_assert (!old || NM_IS_IP4_CONFIG (old));
+	nm_assert (!config || NM_IS_IP4_CONFIG (config));
+	nm_assert (!old || nm_ip4_config_get_ifindex (old) == nm_device_get_ip_ifindex (self));
+	nm_assert (!config || nm_ip4_config_get_ifindex (config) == nm_device_get_ip_ifindex (self));
+
 	if (!_replace_vpn_config_in_list (&priv->vpn4_configs, (GObject *) old, (GObject *) config))
 		return;
 
 	/* NULL to use existing configs */
-	if (!ip4_config_merge_and_apply (self, NULL, TRUE))
+	if (!ip4_config_merge_and_apply (self, TRUE))
 		_LOGW (LOGD_IP4, "failed to set VPN routes for device");
 }
 
@@ -10059,7 +10213,7 @@ nm_device_set_wwan_ip4_config (NMDevice *self, NMIP4Config *config)
 		priv->wwan_ip4_config = g_object_ref (config);
 
 	/* NULL to use existing configs */
-	if (!ip4_config_merge_and_apply (self, NULL, TRUE))
+	if (!ip4_config_merge_and_apply (self, TRUE))
 		_LOGW (LOGD_IP4, "failed to set WWAN IPv4 configuration");
 }
 
@@ -10072,7 +10226,6 @@ nm_device_set_ip6_config (NMDevice *self,
 	NMIP6Config *old_config = NULL;
 	gboolean has_changes = FALSE;
 	gboolean success = TRUE;
-	gboolean def_route_changed;
 	int ip_ifindex = 0;
 
 	g_return_val_if_fail (NM_IS_DEVICE (self), FALSE);
@@ -10091,9 +10244,19 @@ nm_device_set_ip6_config (NMDevice *self,
 
 	/* Always commit to nm-platform to update lifetimes */
 	if (commit && new_config) {
+		gs_unref_ptrarray GPtrArray *temporary_not_available = NULL;
+
 		_commit_mtu (self, priv->ip4_config);
+
 		success = nm_ip6_config_commit (new_config,
-		                                nm_device_get_platform (self));
+		                                nm_device_get_platform (self),
+		                                nm_device_get_route_table (self, AF_INET6, FALSE)
+		                                  ? NM_IP_ROUTE_TABLE_SYNC_MODE_FULL
+		                                  : NM_IP_ROUTE_TABLE_SYNC_MODE_MAIN,
+		                                &temporary_not_available);
+
+		if (!_rt6_temporary_not_available_set (self, temporary_not_available))
+			success = FALSE;
 	}
 
 	if (new_config) {
@@ -10122,8 +10285,6 @@ nm_device_set_ip6_config (NMDevice *self,
 		_LOGD (LOGD_IP6, "ip6-config: clear IP6Config instance (%s)",
 		       nm_exported_object_get_path (NM_EXPORTED_OBJECT (old_config)));
 	}
-
-	def_route_changed = nm_default_route_manager_ip6_update_default_route (nm_netns_get_default_route_manager (priv->netns), self);
 
 	if (has_changes) {
 		NMSettingsConnection *settings_connection;
@@ -10154,9 +10315,6 @@ nm_device_set_ip6_config (NMDevice *self,
 
 		if (priv->ndisc)
 			ndisc_set_router_config (priv->ndisc, self);
-	} else if (def_route_changed) {
-		_LOGD (LOGD_IP6, "ip6-config: default route changed");
-		g_signal_emit (self, signals[IP6_CONFIG_CHANGED], 0, priv->ip6_config, priv->ip6_config);
 	}
 
 	return success;
@@ -10166,6 +10324,11 @@ void
 nm_device_replace_vpn6_config (NMDevice *self, NMIP6Config *old, NMIP6Config *config)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+
+	nm_assert (!old || NM_IS_IP6_CONFIG (old));
+	nm_assert (!config || NM_IS_IP6_CONFIG (config));
+	nm_assert (!old || nm_ip6_config_get_ifindex (old) == nm_device_get_ip_ifindex (self));
+	nm_assert (!config || nm_ip6_config_get_ifindex (config) == nm_device_get_ip_ifindex (self));
 
 	if (!_replace_vpn_config_in_list (&priv->vpn6_configs, (GObject *) old, (GObject *) config))
 		return;
@@ -10416,7 +10579,7 @@ nm_device_start_ip_check (NMDevice *self)
 	NMSettingConnection *s_con;
 	guint timeout = 0;
 	const char *ping_binary = NULL;
-	char buf[INET6_ADDRSTRLEN] = { 0 };
+	char buf[NM_UTILS_INET_ADDRSTRLEN];
 	NMLogDomain log_domain = LOGD_IP4;
 
 	/* Shouldn't be any active ping here, since IP_CHECK happens after the
@@ -10435,25 +10598,24 @@ nm_device_start_ip_check (NMDevice *self)
 	g_assert (s_con);
 	timeout = nm_setting_connection_get_gateway_ping_timeout (s_con);
 
+	buf[0] = '\0';
 	if (timeout) {
+		const NMPObject *gw;
+
 		if (priv->ip4_config && priv->ip4_state == IP_DONE) {
-			guint gw = 0;
-
-			ping_binary = nm_utils_find_helper ("ping", "/usr/bin/ping", NULL);
-			log_domain = LOGD_IP4;
-
-			gw = nm_ip4_config_get_gateway (priv->ip4_config);
-			if (gw && !inet_ntop (AF_INET, &gw, buf, sizeof (buf)))
-				buf[0] = '\0';
+			gw = nm_ip4_config_best_default_route_get (priv->ip4_config);
+			if (gw) {
+				nm_utils_inet4_ntop (NMP_OBJECT_CAST_IP4_ROUTE (gw)->gateway, buf);
+				ping_binary = nm_utils_find_helper ("ping", "/usr/bin/ping", NULL);
+				log_domain = LOGD_IP4;
+			}
 		} else if (priv->ip6_config && priv->ip6_state == IP_DONE) {
-			const struct in6_addr *gw = NULL;
-
-			ping_binary = nm_utils_find_helper ("ping6", "/usr/bin/ping6", NULL);
-			log_domain = LOGD_IP6;
-
-			gw = nm_ip6_config_get_gateway (priv->ip6_config);
-			if (gw && !inet_ntop (AF_INET6, gw, buf, sizeof (buf)))
-				buf[0] = '\0';
+			gw = nm_ip6_config_best_default_route_get (priv->ip6_config);
+			if (gw) {
+				nm_utils_inet6_ntop (&NMP_OBJECT_CAST_IP6_ROUTE (gw)->gateway, buf);
+				ping_binary = nm_utils_find_helper ("ping6", "/usr/bin/ping6", NULL);
+				log_domain = LOGD_IP6;
+			}
 		}
 	}
 
@@ -10576,7 +10738,7 @@ nm_device_bring_up (NMDevice *self, gboolean block, gboolean *no_firmware)
 
 	/* when the link comes up, we must restore IP configuration if necessary. */
 	if (priv->ip4_state == IP_DONE) {
-		if (!ip4_config_merge_and_apply (self, NULL, TRUE))
+		if (!ip4_config_merge_and_apply (self, TRUE))
 			_LOGW (LOGD_IP4, "failed applying IP4 config after bringing link up");
 	}
 	if (priv->ip6_state == IP_DONE) {
@@ -10660,20 +10822,27 @@ find_ip4_lease_config (NMDevice *self,
 
 	leases = nm_dhcp_manager_get_lease_ip_configs (nm_dhcp_manager_get (),
 	                                               nm_device_get_multi_index (self),
+	                                               AF_INET,
 	                                               ip_iface,
 	                                               ip_ifindex,
 	                                               nm_connection_get_uuid (connection),
-	                                               FALSE,
-	                                               nm_device_get_ip4_route_metric (self));
+	                                               nm_device_get_route_table (self, AF_INET, TRUE),
+	                                               nm_device_get_route_metric (self, AF_INET));
 	for (liter = leases; liter && !found; liter = liter->next) {
 		NMIP4Config *lease_config = liter->data;
 		const NMPlatformIP4Address *address = nm_ip4_config_get_first_address (lease_config);
-		guint32 gateway = nm_ip4_config_get_gateway (lease_config);
+		const NMPObject *gw1, *gw2;
 
 		g_assert (address);
 		if (!nm_ip4_config_address_exists (ext_ip4_config, address))
 			continue;
-		if (gateway != nm_ip4_config_get_gateway (ext_ip4_config))
+		gw1 = nm_ip4_config_best_default_route_get (lease_config);
+		if (!gw1)
+			continue;
+		gw2 = nm_ip4_config_best_default_route_get (ext_ip4_config);
+		if (!gw2)
+			continue;
+		if (NMP_OBJECT_CAST_IP4_ROUTE (gw1)->gateway != NMP_OBJECT_CAST_IP4_ROUTE (gw2)->gateway)
 			continue;
 		found = g_object_ref (lease_config);
 	}
@@ -10748,155 +10917,161 @@ capture_lease_config (NMDevice *self,
 	}
 }
 
-static void
-update_ip4_config (NMDevice *self, gboolean initial)
+static gboolean
+update_ext_ip_config (NMDevice *self, int addr_family, gboolean initial, gboolean intersect_configs)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 	int ifindex;
 	gboolean capture_resolv_conf;
 	GSList *iter;
 
-	/* If a commit is scheduled, this function would potentially interfere with
-	 * it changing IP configurations before they are applied. Postpone the
-	 * update in such case.
-	 */
-	if (   !initial
-	    && activation_source_is_scheduled (self,
-	                                       activate_stage5_ip4_config_result,
-	                                       AF_INET)) {
-		priv->queued_ip4_config_pending = FALSE;
-		priv->queued_ip4_config_id = g_idle_add (queued_ip4_config_change, self);
-		_LOGT (LOGD_DEVICE, "IP4 update was postponed");
-		return;
-	}
+	nm_assert_addr_family (addr_family);
 
 	ifindex = nm_device_get_ip_ifindex (self);
 	if (!ifindex)
-		return;
+		return FALSE;
 
 	capture_resolv_conf =    initial
 	                      && nm_dns_manager_get_resolv_conf_explicit (nm_dns_manager_get ());
 
-	/* IPv4 */
-	g_clear_object (&priv->ext_ip4_config);
-	priv->ext_ip4_config = nm_ip4_config_capture (nm_device_get_multi_index (self),
-	                                              nm_device_get_platform (self),
-	                                              ifindex,
-	                                              capture_resolv_conf);
-	if (priv->ext_ip4_config) {
-		if (initial) {
-			g_clear_object (&priv->dev_ip4_config);
-			capture_lease_config (self, priv->ext_ip4_config, &priv->dev_ip4_config, NULL, NULL);
+	if (addr_family == AF_INET) {
+
+		g_clear_object (&priv->ext_ip4_config);
+		priv->ext_ip4_config = nm_ip4_config_capture (nm_device_get_multi_index (self),
+		                                              nm_device_get_platform (self),
+		                                              ifindex,
+		                                              capture_resolv_conf);
+		if (priv->ext_ip4_config) {
+			if (initial) {
+				g_clear_object (&priv->dev_ip4_config);
+				capture_lease_config (self, priv->ext_ip4_config, &priv->dev_ip4_config, NULL, NULL);
+			}
+
+			if (intersect_configs) {
+				/* This function was called upon external changes. Remove the configuration
+				 * (addresses,routes) that is no longer present externally from the internal
+				 * config. This way, we don't re-add addresses that were manually removed
+				 * by the user. */
+				if (priv->con_ip4_config) {
+					nm_ip4_config_intersect (priv->con_ip4_config, priv->ext_ip4_config,
+					                         default_route_metric_penalty_get (self, AF_INET));
+				}
+				if (priv->dev_ip4_config) {
+					nm_ip4_config_intersect (priv->dev_ip4_config, priv->ext_ip4_config,
+					                         default_route_metric_penalty_get (self, AF_INET));
+				}
+				if (priv->wwan_ip4_config) {
+					nm_ip4_config_intersect (priv->wwan_ip4_config, priv->ext_ip4_config,
+					                         default_route_metric_penalty_get (self, AF_INET));
+				}
+				for (iter = priv->vpn4_configs; iter; iter = iter->next)
+					nm_ip4_config_intersect (iter->data, priv->ext_ip4_config, 0);
+			}
+
+			/* Remove parts from ext_ip4_config to only contain the information that
+			 * was configured externally -- we already have the same configuration from
+			 * internal origins. */
+			if (priv->con_ip4_config) {
+				nm_ip4_config_subtract (priv->ext_ip4_config, priv->con_ip4_config,
+				                        default_route_metric_penalty_get (self, AF_INET));
+			}
+			if (priv->dev_ip4_config) {
+				nm_ip4_config_subtract (priv->ext_ip4_config, priv->dev_ip4_config,
+				                        default_route_metric_penalty_get (self, AF_INET));
+			}
+			if (priv->wwan_ip4_config) {
+				nm_ip4_config_subtract (priv->ext_ip4_config, priv->wwan_ip4_config,
+				                        default_route_metric_penalty_get (self, AF_INET));
+			}
+			for (iter = priv->vpn4_configs; iter; iter = iter->next)
+				nm_ip4_config_subtract (priv->ext_ip4_config, iter->data, 0);
 		}
 
-		/* FIXME: ext_ip4_config does not contain routes with source==RTPROT_KERNEL.
-		 * Hence, we will wrongly remove device-routes with metric=0 if they were added by
-		 * the user on purpose. This should be fixed by also tracking and exposing
-		 * kernel routes. */
+	} else {
+		nm_assert (addr_family == AF_INET6);
 
-		/* This function was called upon external changes. Remove the configuration
-		 * (addresses,routes) that is no longer present externally from the internal
-		 * config. This way, we don't re-add addresses that were manually removed
-		 * by the user. */
-		if (priv->con_ip4_config)
-			nm_ip4_config_intersect (priv->con_ip4_config, priv->ext_ip4_config);
-		if (priv->dev_ip4_config)
-			nm_ip4_config_intersect (priv->dev_ip4_config, priv->ext_ip4_config);
-		if (priv->wwan_ip4_config)
-			nm_ip4_config_intersect (priv->wwan_ip4_config, priv->ext_ip4_config);
-		for (iter = priv->vpn4_configs; iter; iter = iter->next)
-			nm_ip4_config_intersect (iter->data, priv->ext_ip4_config);
+		g_clear_object (&priv->ext_ip6_config);
+		g_clear_object (&priv->ext_ip6_config_captured);
+		priv->ext_ip6_config_captured = nm_ip6_config_capture (nm_device_get_multi_index (self),
+		                                                       nm_device_get_platform (self),
+		                                                       ifindex,
+		                                                       capture_resolv_conf,
+		                                                       NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN);
+		if (priv->ext_ip6_config_captured) {
 
-		/* Remove parts from ext_ip4_config to only contain the information that
-		 * was configured externally -- we already have the same configuration from
-		 * internal origins. */
-		if (priv->con_ip4_config)
-			nm_ip4_config_subtract (priv->ext_ip4_config, priv->con_ip4_config);
-		if (priv->dev_ip4_config)
-			nm_ip4_config_subtract (priv->ext_ip4_config, priv->dev_ip4_config);
-		if (priv->wwan_ip4_config)
-			nm_ip4_config_subtract (priv->ext_ip4_config, priv->wwan_ip4_config);
-		for (iter = priv->vpn4_configs; iter; iter = iter->next)
-			nm_ip4_config_subtract (priv->ext_ip4_config, iter->data);
+			priv->ext_ip6_config = nm_ip6_config_new_cloned (priv->ext_ip6_config_captured);
 
-		ip4_config_merge_and_apply (self, NULL, FALSE);
+			if (intersect_configs) {
+				/* This function was called upon external changes. Remove the configuration
+				 * (addresses,routes) that is no longer present externally from the internal
+				 * config. This way, we don't re-add addresses that were manually removed
+				 * by the user. */
+				if (priv->con_ip6_config) {
+					nm_ip6_config_intersect (priv->con_ip6_config, priv->ext_ip6_config,
+					                         default_route_metric_penalty_get (self, AF_INET6));
+				}
+				if (priv->ac_ip6_config) {
+					nm_ip6_config_intersect (priv->ac_ip6_config, priv->ext_ip6_config,
+					                         default_route_metric_penalty_get (self, AF_INET6));
+				}
+				if (priv->dhcp6.ip6_config) {
+					nm_ip6_config_intersect (priv->dhcp6.ip6_config, priv->ext_ip6_config,
+					                         default_route_metric_penalty_get (self, AF_INET6));
+				}
+				if (priv->wwan_ip6_config) {
+					nm_ip6_config_intersect (priv->wwan_ip6_config, priv->ext_ip6_config,
+					                         default_route_metric_penalty_get (self, AF_INET6));
+				}
+				for (iter = priv->vpn6_configs; iter; iter = iter->next)
+					nm_ip6_config_intersect (iter->data, priv->ext_ip6_config, 0);
+			}
+
+			/* Remove parts from ext_ip6_config to only contain the information that
+			 * was configured externally -- we already have the same configuration from
+			 * internal origins. */
+			if (priv->con_ip6_config) {
+				nm_ip6_config_subtract (priv->ext_ip6_config, priv->con_ip6_config,
+				                        default_route_metric_penalty_get (self, AF_INET6));
+			}
+			if (priv->ac_ip6_config) {
+				nm_ip6_config_subtract (priv->ext_ip6_config, priv->ac_ip6_config,
+				                        default_route_metric_penalty_get (self, AF_INET6));
+			}
+			if (priv->dhcp6.ip6_config) {
+				nm_ip6_config_subtract (priv->ext_ip6_config, priv->dhcp6.ip6_config,
+				                        default_route_metric_penalty_get (self, AF_INET6));
+			}
+			if (priv->wwan_ip6_config) {
+				nm_ip6_config_subtract (priv->ext_ip6_config, priv->wwan_ip6_config,
+				                        default_route_metric_penalty_get (self, AF_INET6));
+			}
+			for (iter = priv->vpn6_configs; iter; iter = iter->next)
+				nm_ip6_config_subtract (priv->ext_ip6_config, iter->data, 0);
+		}
 	}
+
+	return TRUE;
 }
 
 static void
-update_ip6_config (NMDevice *self, gboolean initial)
+update_ip_config (NMDevice *self, int addr_family, gboolean initial)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
-	int ifindex;
-	gboolean capture_resolv_conf;
-	GSList *iter;
 
-	/* If a commit is scheduled, this function would potentially interfere with
-	 * it changing IP configurations before they are applied. Postpone the
-	 * update in such case.
-	 */
-	if (   !initial
-	    && activation_source_is_scheduled (self,
-	                                       activate_stage5_ip6_config_commit,
-	                                       AF_INET6)) {
-		priv->queued_ip6_config_pending = FALSE;
-		priv->queued_ip6_config_id = g_idle_add (queued_ip6_config_change, self);
-		_LOGT (LOGD_DEVICE, "IP6 update was postponed");
-		return;
+	nm_assert_addr_family (addr_family);
+
+	if (update_ext_ip_config (self, addr_family, initial, TRUE)) {
+		if (addr_family == AF_INET) {
+			if (priv->ext_ip4_config)
+				ip4_config_merge_and_apply (self, FALSE);
+		} else {
+			if (priv->ext_ip6_config_captured)
+				ip6_config_merge_and_apply (self, FALSE);
+		}
 	}
 
-	ifindex = nm_device_get_ip_ifindex (self);
-	if (!ifindex)
-		return;
-
-	capture_resolv_conf =    initial
-	                      && nm_dns_manager_get_resolv_conf_explicit (nm_dns_manager_get ());
-
-	/* IPv6 */
-	g_clear_object (&priv->ext_ip6_config);
-	g_clear_object (&priv->ext_ip6_config_captured);
-	priv->ext_ip6_config_captured = nm_ip6_config_capture (nm_device_get_multi_index (self),
-	                                                       nm_device_get_platform (self),
-	                                                       ifindex,
-	                                                       capture_resolv_conf,
-	                                                       NM_SETTING_IP6_CONFIG_PRIVACY_UNKNOWN);
-	if (priv->ext_ip6_config_captured) {
-
-		priv->ext_ip6_config = nm_ip6_config_new_cloned (priv->ext_ip6_config_captured);
-
-		/* This function was called upon external changes. Remove the configuration
-		 * (addresses,routes) that is no longer present externally from the internal
-		 * config. This way, we don't re-add addresses that were manually removed
-		 * by the user. */
-		if (priv->con_ip6_config)
-			nm_ip6_config_intersect (priv->con_ip6_config, priv->ext_ip6_config);
-		if (priv->ac_ip6_config)
-			nm_ip6_config_intersect (priv->ac_ip6_config, priv->ext_ip6_config);
-		if (priv->dhcp6.ip6_config)
-			nm_ip6_config_intersect (priv->dhcp6.ip6_config, priv->ext_ip6_config);
-		if (priv->wwan_ip6_config)
-			nm_ip6_config_intersect (priv->wwan_ip6_config, priv->ext_ip6_config);
-		for (iter = priv->vpn6_configs; iter; iter = iter->next)
-			nm_ip6_config_intersect (iter->data, priv->ext_ip6_config);
-
-		/* Remove parts from ext_ip6_config to only contain the information that
-		 * was configured externally -- we already have the same configuration from
-		 * internal origins. */
-		if (priv->con_ip6_config)
-			nm_ip6_config_subtract (priv->ext_ip6_config, priv->con_ip6_config);
-		if (priv->ac_ip6_config)
-			nm_ip6_config_subtract (priv->ext_ip6_config, priv->ac_ip6_config);
-		if (priv->dhcp6.ip6_config)
-			nm_ip6_config_subtract (priv->ext_ip6_config, priv->dhcp6.ip6_config);
-		if (priv->wwan_ip6_config)
-			nm_ip6_config_subtract (priv->ext_ip6_config, priv->wwan_ip6_config);
-		for (iter = priv->vpn6_configs; iter; iter = iter->next)
-			nm_ip6_config_subtract (priv->ext_ip6_config, iter->data);
-
-		ip6_config_merge_and_apply (self, FALSE);
-	}
-
-	if (   priv->linklocal6_timeout_id
+	if (   addr_family == AF_INET6
+	    && priv->linklocal6_timeout_id
 	    && priv->ext_ip6_config_captured
 	    && nm_ip6_config_get_address_first_nontentative (priv->ext_ip6_config_captured, TRUE)) {
 		/* linklocal6 is ready now, do the state transition... we are also
@@ -10909,8 +11084,8 @@ update_ip6_config (NMDevice *self, gboolean initial)
 void
 nm_device_capture_initial_config (NMDevice *self)
 {
-	update_ip4_config (self, TRUE);
-	update_ip6_config (self, TRUE);
+	update_ip_config (self, AF_INET,  TRUE);
+	update_ip_config (self, AF_INET6, TRUE);
 }
 
 static gboolean
@@ -10930,7 +11105,19 @@ queued_ip4_config_change (gpointer user_data)
 		return TRUE;
 
 	priv->queued_ip4_config_id = 0;
-	update_ip4_config (self, FALSE);
+
+	/* If a commit is scheduled, this function would potentially interfere with
+	 * it changing IP configurations before they are applied. Postpone the
+	 * update in such case.
+	 */
+	if (activation_source_is_scheduled (self,
+	                                    activate_stage5_ip4_config_result,
+	                                    AF_INET)) {
+		priv->queued_ip4_config_pending = FALSE;
+		priv->queued_ip4_config_id = g_idle_add (queued_ip4_config_change, self);
+		_LOGT (LOGD_DEVICE, "IP4 update was postponed");
+	} else
+		update_ip_config (self, AF_INET, FALSE);
 
 	set_unmanaged_external_down (self, TRUE);
 
@@ -10961,7 +11148,19 @@ queued_ip6_config_change (gpointer user_data)
 		return TRUE;
 
 	priv->queued_ip6_config_id = 0;
-	update_ip6_config (self, FALSE);
+
+	/* If a commit is scheduled, this function would potentially interfere with
+	 * it changing IP configurations before they are applied. Postpone the
+	 * update in such case.
+	 */
+	if (activation_source_is_scheduled (self,
+	                                    activate_stage5_ip6_config_commit,
+	                                    AF_INET6)) {
+		priv->queued_ip6_config_pending = FALSE;
+		priv->queued_ip6_config_id = g_idle_add (queued_ip6_config_change, self);
+		_LOGT (LOGD_DEVICE, "IP6 update was postponed");
+	} else
+		update_ip_config (self, AF_INET6, FALSE);
 
 	if (priv->state < NM_DEVICE_STATE_DEACTIVATING
 	    && nm_platform_link_get (nm_device_get_platform (self), priv->ifindex)) {
@@ -11006,6 +11205,8 @@ queued_ip6_config_change (gpointer user_data)
 			g_clear_object (&priv->dad6_ip6_config);
 			_set_ip_state (self, AF_INET6, IP_DONE);
 			check_ip_state (self, FALSE);
+			if (priv->rt6_temporary_not_available)
+				nm_device_activate_schedule_ip6_config_result (self);
 		}
 	}
 
@@ -11081,6 +11282,7 @@ NM_UTILS_FLAGS2STR_DEFINE (nm_unmanaged_flags2str, NMUnmanagedFlags,
 	NM_UTILS_FLAGS2STR (NM_UNMANAGED_USER_EXPLICIT, "user-explicit"),
 	NM_UTILS_FLAGS2STR (NM_UNMANAGED_BY_DEFAULT, "by-default"),
 	NM_UTILS_FLAGS2STR (NM_UNMANAGED_USER_SETTINGS, "user-settings"),
+	NM_UTILS_FLAGS2STR (NM_UNMANAGED_USER_CONF, "user-conf"),
 	NM_UTILS_FLAGS2STR (NM_UNMANAGED_USER_UDEV, "user-udev"),
 	NM_UTILS_FLAGS2STR (NM_UNMANAGED_EXTERNAL_DOWN, "external-down"),
 	NM_UTILS_FLAGS2STR (NM_UNMANAGED_IS_SLAVE, "is-slave"),
@@ -11173,11 +11375,19 @@ _get_managed_by_flags(NMUnmanagedFlags flags, NMUnmanagedFlags mask, gboolean fo
 
 	if (NM_FLAGS_ANY (mask, NM_UNMANAGED_USER_UDEV)) {
 		/* configuration from udev or nm-config overwrites the by-default flag
-		 * which is based on the device type. */
-		flags &= ~NM_UNMANAGED_BY_DEFAULT;
+		 * which is based on the device type.
+		 * configuration from udev overwrites external-down */
+		flags &= ~(  NM_UNMANAGED_BY_DEFAULT
+		           | NM_UNMANAGED_EXTERNAL_DOWN);
+	}
 
-		/* configuration from udev overwrites external-down */
-		flags &= ~NM_UNMANAGED_EXTERNAL_DOWN;
+	if (NM_FLAGS_ANY (mask, NM_UNMANAGED_USER_CONF)) {
+		/* configuration from NetworkManager.conf overwrites the by-default flag
+		 * which is based on the device type.
+		 * It also overwrites the udev configuration and external-down */
+		flags &= ~(   NM_UNMANAGED_BY_DEFAULT
+		           | NM_UNMANAGED_USER_UDEV
+		           | NM_UNMANAGED_EXTERNAL_DOWN);
 	}
 
 	if (   NM_FLAGS_HAS (mask, NM_UNMANAGED_IS_SLAVE)
@@ -11189,9 +11399,9 @@ _get_managed_by_flags(NMUnmanagedFlags flags, NMUnmanagedFlags mask, gboolean fo
 	if (NM_FLAGS_HAS (mask, NM_UNMANAGED_USER_EXPLICIT)) {
 		/* if the device is managed by user-decision, certain other flags
 		 * are ignored. */
-
 		flags &= ~(  NM_UNMANAGED_BY_DEFAULT
 		           | NM_UNMANAGED_USER_UDEV
+		           | NM_UNMANAGED_USER_CONF
 		           | NM_UNMANAGED_EXTERNAL_DOWN);
 	}
 
@@ -11498,6 +11708,35 @@ nm_device_set_unmanaged_by_user_udev (NMDevice *self)
 }
 
 void
+nm_device_set_unmanaged_by_user_conf (NMDevice *self)
+{
+	gboolean value;
+	NMUnmanFlagOp set_op;
+
+	value = nm_config_data_get_device_config_boolean (NM_CONFIG_GET_DATA,
+	                                                  NM_CONFIG_KEYFILE_KEY_DEVICE_MANAGED,
+	                                                  self,
+	                                                  -1,
+	                                                  TRUE);
+	switch (value) {
+	case TRUE:
+		set_op = NM_UNMAN_FLAG_OP_SET_MANAGED;
+		break;
+	case FALSE:
+		set_op = NM_UNMAN_FLAG_OP_SET_UNMANAGED;
+		break;
+	default:
+		set_op = NM_UNMAN_FLAG_OP_FORGET;
+		break;
+	}
+
+	nm_device_set_unmanaged_by_flags (self,
+	                                  NM_UNMANAGED_USER_CONF,
+	                                  set_op,
+	                                  NM_DEVICE_STATE_REASON_USER_REQUESTED);
+}
+
+void
 nm_device_set_unmanaged_by_quitting (NMDevice *self)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
@@ -11516,14 +11755,6 @@ nm_device_set_unmanaged_by_quitting (NMDevice *self)
 }
 
 /*****************************************************************************/
-
-void
-nm_device_set_dhcp_timeout (NMDevice *self, guint32 timeout)
-{
-	g_return_if_fail (NM_IS_DEVICE (self));
-
-	NM_DEVICE_GET_PRIVATE (self)->dhcp_timeout = timeout;
-}
 
 void
 nm_device_set_dhcp_anycast_address (NMDevice *self, const char *addr)
@@ -12065,7 +12296,8 @@ nm_device_has_pending_action (NMDevice *self)
 	if (priv->pending_actions)
 		return TRUE;
 
-	if (nm_device_get_unmanaged_flags (self, NM_UNMANAGED_PLATFORM_INIT)) {
+	if (   nm_device_is_real (self)
+	    && nm_device_get_unmanaged_flags (self, NM_UNMANAGED_PLATFORM_INIT)) {
 		/* as long as the platform link is not yet initialized, we have a pending
 		 * action. */
 		return TRUE;
@@ -12126,25 +12358,21 @@ _cleanup_generic_post (NMDevice *self, CleanupType cleanup_type)
 {
 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
 
-	if (cleanup_type == CLEANUP_TYPE_DECONFIGURE) {
-		_update_default_route (self, AF_INET,  FALSE, FALSE);
-		_update_default_route (self, AF_INET6, FALSE, FALSE);
-	} else {
-		_update_default_route (self, AF_INET,  priv->default_route.v4_has, TRUE);
-		_update_default_route (self, AF_INET6, priv->default_route.v6_has, TRUE);
-	}
-	_update_default_route (self, AF_INET,  FALSE, TRUE);
-	_update_default_route (self, AF_INET6, FALSE, TRUE);
-
 	priv->v4_commit_first_time = TRUE;
 	priv->v6_commit_first_time = TRUE;
+
+	priv->v4_route_table_initalized = FALSE;
+	priv->v6_route_table_initalized = FALSE;
+
+	priv->default_route_metric_penalty_ip4_has = FALSE;
+	priv->default_route_metric_penalty_ip6_has = FALSE;
 
 	priv->linklocal6_dad_counter = 0;
 
 	/* Clean up IP configs; this does not actually deconfigure the
 	 * interface; the caller must flush routes and addresses explicitly.
 	 */
-	nm_device_set_ip4_config (self, NULL, 0, TRUE);
+	nm_device_set_ip4_config (self, NULL, TRUE, NULL);
 	nm_device_set_ip6_config (self, NULL, TRUE);
 	g_clear_object (&priv->proxy_config);
 	g_clear_object (&priv->con_ip4_config);
@@ -12159,6 +12387,9 @@ _cleanup_generic_post (NMDevice *self, CleanupType cleanup_type)
 	g_clear_object (&priv->wwan_ip6_config);
 	g_clear_object (&priv->ip6_config);
 	g_clear_object (&priv->dad6_ip6_config);
+
+	g_clear_pointer (&priv->rt6_temporary_not_available, g_hash_table_unref);
+	nm_clear_g_source (&priv->rt6_temporary_not_available_id);
 
 	g_slist_free_full (priv->vpn4_configs, g_object_unref);
 	priv->vpn4_configs = NULL;
@@ -12387,7 +12618,7 @@ nm_device_spawn_iface_helper (NMDevice *self)
 		g_assert (s_ip4);
 
 		g_ptr_array_add (argv, g_strdup ("--priority4"));
-		g_ptr_array_add (argv, g_strdup_printf ("%u", nm_device_get_ip4_route_metric (self)));
+		g_ptr_array_add (argv, g_strdup_printf ("%u", nm_device_get_route_metric (self, AF_INET)));
 
 		g_ptr_array_add (argv, g_strdup ("--dhcp4"));
 		g_ptr_array_add (argv, g_strdup (dhcp4_address));
@@ -12429,7 +12660,7 @@ nm_device_spawn_iface_helper (NMDevice *self)
 		g_assert (s_ip6);
 
 		g_ptr_array_add (argv, g_strdup ("--priority6"));
-		g_ptr_array_add (argv, g_strdup_printf ("%u", nm_device_get_ip6_route_metric (self)));
+		g_ptr_array_add (argv, g_strdup_printf ("%u", nm_device_get_route_metric (self, AF_INET6)));
 
 		g_ptr_array_add (argv, g_strdup ("--slaac"));
 
@@ -12596,7 +12827,7 @@ _set_state_full (NMDevice *self,
 	if (   (priv->state == state)
 	    && (   state != NM_DEVICE_STATE_UNAVAILABLE
 	        || !priv->firmware_missing)) {
-		_LOGD (LOGD_DEVICE, "state change: %s -> %s (reason '%s', internal state '%s'%s)",
+		_LOGD (LOGD_DEVICE, "state change: %s -> %s (reason '%s', sys-iface-state: '%s'%s)",
 		       nm_device_state_to_str (old_state),
 		       nm_device_state_to_str (state),
 		       reason_to_string (reason),
@@ -12605,7 +12836,7 @@ _set_state_full (NMDevice *self,
 		return;
 	}
 
-	_LOGI (LOGD_DEVICE, "state change: %s -> %s (reason '%s', internal state '%s')",
+	_LOGI (LOGD_DEVICE, "state change: %s -> %s (reason '%s', sys-iface-state: '%s')",
 	       nm_device_state_to_str (old_state),
 	       nm_device_state_to_str (state),
 	       reason_to_string (reason),
@@ -13819,16 +14050,12 @@ nm_device_init (NMDevice *self)
 	priv->capabilities = NM_DEVICE_CAP_NM_SUPPORTED;
 	priv->state = NM_DEVICE_STATE_UNMANAGED;
 	priv->state_reason = NM_DEVICE_STATE_REASON_NONE;
-	priv->dhcp_timeout = 0;
 	priv->rfkill_type = RFKILL_TYPE_UNKNOWN;
 	priv->unmanaged_flags = NM_UNMANAGED_PLATFORM_INIT;
 	priv->unmanaged_mask = priv->unmanaged_flags;
 	priv->available_connections = g_hash_table_new_full (g_direct_hash, g_direct_equal, g_object_unref, NULL);
-	priv->ip6_saved_properties = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
+	priv->ip6_saved_properties = g_hash_table_new_full (nm_str_hash, g_str_equal, NULL, g_free);
 	priv->sys_iface_state = NM_DEVICE_SYS_IFACE_STATE_EXTERNAL;
-
-	priv->default_route.v4_is_assumed = TRUE;
-	priv->default_route.v6_is_assumed = TRUE;
 
 	priv->v4_commit_first_time = TRUE;
 	priv->v6_commit_first_time = TRUE;

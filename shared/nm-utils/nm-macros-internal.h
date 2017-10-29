@@ -26,19 +26,40 @@
 #include <stdlib.h>
 #include <errno.h>
 
+#define _nm_packed           __attribute__ ((packed))
+#define _nm_unused           __attribute__ ((unused))
+#define _nm_pure             __attribute__ ((pure))
+#define _nm_const            __attribute__ ((const))
+#define _nm_printf(a,b)      __attribute__ ((__format__ (__printf__, a, b)))
+#define _nm_align(s)         __attribute__ ((aligned (s)))
+#define _nm_alignof(type)    __alignof (type)
+#define _nm_alignas(type)    _nm_align (_nm_alignof (type))
+
+/*****************************************************************************/
+
+#ifdef thread_local
+#define _nm_thread_local thread_local
+/*
+ * Don't break on glibc < 2.16 that doesn't define __STDC_NO_THREADS__
+ * see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=53769
+ */
+#elif __STDC_VERSION__ >= 201112L && !(defined(__STDC_NO_THREADS__) || (defined(__GNU_LIBRARY__) && __GLIBC__ == 2 && __GLIBC_MINOR__ < 16))
+#define _nm_thread_local _Thread_local
+#else
+#define _nm_thread_local __thread
+#endif
+
+/*****************************************************************************/
+
 #include "nm-glib.h"
 
 /*****************************************************************************/
 
-#define _nm_packed __attribute__ ((packed))
-#define _nm_unused __attribute__ ((unused))
-#define _nm_pure   __attribute__ ((pure))
-#define _nm_const  __attribute__ ((const))
-#define _nm_printf(a,b) __attribute__ ((__format__ (__printf__, a, b)))
-
 #define nm_offsetofend(t,m) (G_STRUCT_OFFSET (t,m) + sizeof (((t *) NULL)->m))
 
 #define nm_auto(fcn) __attribute__ ((cleanup(fcn)))
+
+static inline int nm_close (int fd);
 
 /**
  * nm_auto_free:
@@ -56,10 +77,10 @@ _nm_auto_unset_gvalue_impl (GValue *v)
 #define nm_auto_unset_gvalue nm_auto(_nm_auto_unset_gvalue_impl)
 
 static inline void
-_nm_auto_unref_gtypeclass (GTypeClass **v)
+_nm_auto_unref_gtypeclass (gpointer v)
 {
-	if (v && *v)
-		g_type_class_unref (*v);
+	if (v && *((gpointer *) v))
+		g_type_class_unref (*((gpointer *) v));
 }
 #define nm_auto_unref_gtypeclass nm_auto(_nm_auto_unref_gtypeclass)
 
@@ -77,7 +98,7 @@ _nm_auto_close_impl (int *pfd)
 	if (*pfd >= 0) {
 		int errsv = errno;
 
-		(void) close (*pfd);
+		(void) nm_close (*pfd);
 		errno = errsv;
 	}
 }
@@ -269,6 +290,18 @@ NM_G_ERROR_MSG (GError *error)
 	((type *) (obj))
 #endif
 
+#if _NM_CC_SUPPORT_GENERIC
+/* returns @value, if the type of @value matches @type.
+ * This requires support for C11 _Generic(). If no support is
+ * present, this returns @value directly.
+ *
+ * It's useful to check the let the compiler ensure that @value is
+ * of a certain type. */
+#define _NM_ENSURE_TYPE(type, value) (_Generic ((value), type: (value)))
+#else
+#define _NM_ENSURE_TYPE(type, value) (value)
+#endif
+
 /*****************************************************************************/
 
 #define _NM_IN_SET_EVAL_1( op, _x, y)           (_x == (y))
@@ -407,21 +440,6 @@ _NM_IN_STRSET_streq (const char *x, const char *s)
 		} \
 		_val; \
 	})
-
-/*****************************************************************************/
-
-static inline guint
-NM_HASH_COMBINE (guint h, guint val)
-{
-	/* see g_str_hash() for reasons */
-	return (h << 5) + h + val;
-}
-
-static inline guint
-NM_HASH_COMBINE_UINT64 (guint h, guint64 val)
-{
-	return NM_HASH_COMBINE (h, (((guint) val) & 0xFFFFFFFFu) + ((guint) (val >> 32)));
-}
 
 /*****************************************************************************/
 
@@ -619,6 +637,36 @@ nm_g_object_unref (gpointer obj)
 		g_object_unref (obj);
 }
 
+/* Assigns GObject @obj to destination @pdst, and takes an additional ref.
+ * The previous value of @pdst is unrefed.
+ *
+ * It makes sure to first increase the ref-count of @obj, and handles %NULL
+ * @obj correctly.
+ * */
+#define nm_g_object_ref_set(pp, obj) \
+	({ \
+		typeof (*(pp)) *const _pp = (pp); \
+		typeof (**_pp) *const _obj = (obj); \
+		typeof (**_pp) *_p; \
+		gboolean _changed = FALSE; \
+		\
+		if (   _pp \
+		    && ((_p = *_pp) != _obj)) { \
+			if (_obj) { \
+				nm_assert (G_IS_OBJECT (_obj)); \
+				 g_object_ref (_obj); \
+			} \
+			if (_p) { \
+				nm_assert (G_IS_OBJECT (_p)); \
+				*_pp = NULL; \
+				g_object_unref (_p); \
+			} \
+			*_pp = _obj; \
+			_changed = TRUE; \
+		} \
+		_changed; \
+	})
+
 /* basically, replaces
  *   g_clear_pointer (&location, g_free)
  * with
@@ -631,13 +679,32 @@ nm_g_object_unref (gpointer obj)
 #define nm_clear_g_free(pp) \
 	({  \
 		typeof (*(pp)) *_pp = (pp); \
-		typeof (**_pp) *_p = *_pp; \
+		typeof (**_pp) *_p; \
+		gboolean _changed = FALSE; \
 		\
-		if (_p) { \
+		if (  _pp \
+		    && (_p = *_pp)) { \
 			*_pp = NULL; \
 			g_free (_p); \
+			_changed = TRUE; \
 		} \
-		!!_p; \
+		_changed; \
+	})
+
+#define nm_clear_g_object(pp) \
+	({ \
+		typeof (*(pp)) *_pp = (pp); \
+		typeof (**_pp) *_p; \
+		gboolean _changed = FALSE; \
+		\
+		if (   _pp \
+		    && (_p = *_pp)) { \
+			nm_assert (G_IS_OBJECT (_p)); \
+			*_pp = NULL; \
+			g_object_unref (_p); \
+			_changed = TRUE; \
+		} \
+		_changed; \
 	})
 
 static inline gboolean
@@ -807,6 +874,33 @@ nm_strstrip (char *str)
 {
 	/* g_strstrip doesn't like NULL. */
 	return str ? g_strstrip (str) : NULL;
+}
+
+static inline const char *
+nm_strstrip_avoid_copy (const char *str, char **str_free)
+{
+	gsize l;
+	char *s;
+
+	nm_assert (str_free && !*str_free);
+
+	if (!str)
+		return NULL;
+
+	str = nm_str_skip_leading_spaces (str);
+	l = strlen (str);
+	if (   l == 0
+	    || !g_ascii_isspace (str[l - 1]))
+		return str;
+	while (   l > 0
+	       && g_ascii_isspace (str[l - 1]))
+		l--;
+
+	s = g_new (char, l + 1);
+	memcpy (s, str, l);
+	s[l] = '\0';
+	*str_free = s;
+	return s;
 }
 
 /* g_ptr_array_sort()'s compare function takes pointers to the
@@ -1056,5 +1150,36 @@ nm_decode_version (guint version, guint *major, guint *minor, guint *micro)
 #endif
 
 /*****************************************************************************/
+
+static inline int
+nm_steal_fd (int *p_fd)
+{
+	int fd;
+
+	if (   p_fd
+	    && ((fd = *p_fd) > 0)) {
+		*p_fd = -1;
+		return fd;
+	}
+	return -1;
+}
+
+/**
+ * nm_close:
+ *
+ * Like close() but throws an assertion if the input fd is
+ * invalid.  Closing an invalid fd is a programming error, so
+ * it's better to catch it early.
+ */
+static inline int
+nm_close (int fd)
+{
+	if (fd >= 0) {
+		if (close (fd) == 0)
+			return 0;
+		nm_assert (errno != EBADF);
+	}
+	return -1;
+}
 
 #endif /* __NM_MACROS_INTERNAL_H__ */

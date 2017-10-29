@@ -23,6 +23,8 @@
 
 #include "nm-dedup-multi.h"
 
+#include "nm-hash-utils.h"
+
 /*****************************************************************************/
 
 typedef struct {
@@ -53,9 +55,9 @@ ASSERT_idx_type (const NMDedupMultiIdxType *idx_type)
 	nm_assert (idx_type);
 #if NM_MORE_ASSERTS > 10
 	nm_assert (idx_type->klass);
-	nm_assert (idx_type->klass->idx_obj_id_hash);
+	nm_assert (idx_type->klass->idx_obj_id_hash_update);
 	nm_assert (idx_type->klass->idx_obj_id_equal);
-	nm_assert (!!idx_type->klass->idx_obj_partition_hash == !!idx_type->klass->idx_obj_partition_equal);
+	nm_assert (!!idx_type->klass->idx_obj_partition_hash_update == !!idx_type->klass->idx_obj_partition_equal);
 	nm_assert (idx_type->lst_idx_head.next);
 #endif
 }
@@ -174,21 +176,21 @@ _dict_idx_entries_hash (const NMDedupMultiEntry *entry)
 	const NMDedupMultiIdxType *idx_type;
 	const NMDedupMultiObj *obj;
 	gboolean lookup_head;
-	guint h;
+	NMHashState h;
 
 	_entry_unpack (entry, &idx_type, &obj, &lookup_head);
 
-	if (idx_type->klass->idx_obj_partition_hash) {
+	nm_hash_init (&h, 1914869417u);
+	if (idx_type->klass->idx_obj_partition_hash_update) {
 		nm_assert (obj);
-		h = idx_type->klass->idx_obj_partition_hash (idx_type, obj);
-	} else
-		h = 1914869417;
+		idx_type->klass->idx_obj_partition_hash_update (idx_type, obj, &h);
+	}
 
 	if (!lookup_head)
-		h = NM_HASH_COMBINE (h, idx_type->klass->idx_obj_id_hash (idx_type, obj));
+		idx_type->klass->idx_obj_id_hash_update (idx_type, obj, &h);
 
-	h = NM_HASH_COMBINE (h, GPOINTER_TO_UINT (idx_type));
-	return h;
+	nm_hash_update_val (&h, idx_type);
+	return nm_hash_complete (&h);
 }
 
 static gboolean
@@ -795,7 +797,11 @@ nm_dedup_multi_index_dirty_remove_idx (NMDedupMultiIndex *self,
 static guint
 _dict_idx_objs_hash (const NMDedupMultiObj *obj)
 {
-	return obj->klass->obj_full_hash (obj);
+	NMHashState h;
+
+	nm_hash_init (&h, 1748638583u);
+	obj->klass->obj_full_hash_update (obj, &h);
+	return nm_hash_complete (&h);
 }
 
 static gboolean
@@ -869,22 +875,6 @@ nm_dedup_multi_index_obj_intern (NMDedupMultiIndex *self,
 
 	((NMDedupMultiObj *) obj_new)->_multi_idx = self;
 	return obj_new;
-}
-
-const NMDedupMultiObj *
-nm_dedup_multi_obj_ref (const NMDedupMultiObj *obj)
-{
-	/* ref and unref accept const pointers. Objects is supposed to be shared
-	 * and kept immutable. Disallowing to take/retrun a reference to a const
-	 * NMPObject is cumbersome, because callers are precisely expected to
-	 * keep a ref on the otherwise immutable object. */
-
-	nm_assert (obj);
-	nm_assert (obj->_ref_count != NM_OBJ_REF_COUNT_STACKINIT);
-	nm_assert (obj->_ref_count > 0);
-
-	((NMDedupMultiObj *) obj)->_ref_count++;
-	return obj;
 }
 
 const NMDedupMultiObj *

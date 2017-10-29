@@ -406,6 +406,9 @@ typedef struct {
 	void            (* reapply_connection) (NMDevice *self,
 	                                        NMConnection *con_old,
 	                                        NMConnection *con_new);
+
+	guint32         (* get_dhcp_timeout) (NMDevice *self,
+	                                      int addr_family);
 } NMDeviceClass;
 
 typedef void (*NMDeviceAuthRequestFunc) (NMDevice *device,
@@ -444,9 +447,8 @@ NMDeviceType    nm_device_get_device_type       (NMDevice *dev);
 NMLinkType      nm_device_get_link_type         (NMDevice *dev);
 NMMetered       nm_device_get_metered           (NMDevice *dev);
 
-int             nm_device_get_priority          (NMDevice *dev);
-guint32         nm_device_get_ip4_route_metric  (NMDevice *dev);
-guint32         nm_device_get_ip6_route_metric  (NMDevice *dev);
+guint32         nm_device_get_route_table       (NMDevice *self, int addr_family, gboolean fallback_main);
+guint32         nm_device_get_route_metric      (NMDevice *dev, int addr_family);
 
 const char *    nm_device_get_hw_address        (NMDevice *dev);
 const char *    nm_device_get_permanent_hw_address (NMDevice *self);
@@ -565,6 +567,10 @@ void nm_device_copy_ip6_dns_config (NMDevice *self, NMDevice *from_device);
  *   the settings plugins, such as NM_CONTROLLED=no in ifcfg-rh), it cannot
  *   be overruled and is authorative. That is because users may depend on
  *   dropping a ifcfg-rh file to ensure the device is unmanaged.
+ * @NM_UNMANAGED_USER_CONF: %TRUE when unmanaged by user decision via
+ *   the NetworkManager.conf ("unmanaged" in the [device] section).
+ *   Contray to @NM_UNMANAGED_USER_SETTINGS, this can be overwritten via
+ *   D-Bus.
  * @NM_UNMANAGED_BY_DEFAULT: %TRUE for certain device types where we unmanage
  *   them by default
  * @NM_UNMANAGED_USER_UDEV: %TRUE when unmanaged by user decision (via UDev rule)
@@ -589,6 +595,7 @@ typedef enum { /*< skip >*/
 	/* These flags can be non-effective and be overwritten
 	 * by other flags. */
 	NM_UNMANAGED_BY_DEFAULT    = (1LL <<  8),
+	NM_UNMANAGED_USER_CONF     = (1LL <<  9),
 	NM_UNMANAGED_USER_UDEV     = (1LL << 10),
 	NM_UNMANAGED_EXTERNAL_DOWN = (1LL << 11),
 	NM_UNMANAGED_IS_SLAVE      = (1LL << 12),
@@ -619,6 +626,7 @@ void nm_device_set_unmanaged_by_flags_queue (NMDevice *self,
                                              NMDeviceStateReason reason);
 void nm_device_set_unmanaged_by_user_settings (NMDevice *self);
 void nm_device_set_unmanaged_by_user_udev (NMDevice *self);
+void nm_device_set_unmanaged_by_user_conf (NMDevice *self);
 void nm_device_set_unmanaged_by_quitting (NMDevice *device);
 
 gboolean nm_device_is_nm_owned (NMDevice *device);
@@ -698,8 +706,8 @@ gboolean nm_device_owns_iface (NMDevice *device, const char *iface);
 
 NMConnection *nm_device_new_default_connection (NMDevice *self);
 
-const NMPlatformIP4Route *nm_device_get_ip4_default_route (NMDevice *self, gboolean *out_is_assumed);
-const NMPlatformIP6Route *nm_device_get_ip6_default_route (NMDevice *self, gboolean *out_is_assumed);
+const NMPObject *nm_device_get_best_default_route (NMDevice *self,
+                                                   int addr_family);
 
 void nm_device_spawn_iface_helper (NMDevice *self);
 

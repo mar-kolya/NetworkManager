@@ -84,6 +84,7 @@ typedef struct {
 	char *name;
 	guint32 capabilities;
 	gboolean connected;
+	gboolean paired;
 
 	char *b4_iface;
 #if WITH_BLUEZ5_DUN
@@ -278,10 +279,11 @@ check_emit_usable (NMBluezDevice *self)
 	/* only expect the supported capabilities set. */
 	nm_assert ((priv->capabilities & ~(NM_BT_CAPABILITY_NAP | NM_BT_CAPABILITY_DUN)) == NM_BT_CAPABILITY_NONE );
 
-	new_usable = (priv->initialized && priv->capabilities && priv->name &&
-	              ((priv->bluez_version == 4) ||
-	               (priv->bluez_version == 5 && priv->adapter5 && priv->adapter_powered) ) &&
-	              priv->dbus_connection && priv->address && priv->adapter_address);
+	new_usable = (   priv->initialized && priv->capabilities
+	              && priv->name && priv->paired
+	              && (   (priv->bluez_version == 4)
+	                  || (priv->bluez_version == 5 && priv->adapter5 && priv->adapter_powered))
+	              && priv->dbus_connection && priv->address && priv->adapter_address);
 
 	if (!new_usable)
 		goto END;
@@ -799,6 +801,17 @@ _take_variant_property_connected (NMBluezDevice *self, GVariant *v)
 		g_variant_unref (v);
 }
 
+static void
+_take_variant_property_paired (NMBluezDevice *self, GVariant *v)
+{
+	NMBluezDevicePrivate *priv = NM_BLUEZ_DEVICE_GET_PRIVATE (self);
+
+	if (VARIANT_IS_OF_TYPE_BOOLEAN (v))
+		priv->paired = g_variant_get_boolean (v);
+
+	if (v)
+		g_variant_unref (v);
+}
 
 static void
 adapter5_on_properties_changed (GDBusProxy *proxy,
@@ -868,6 +881,8 @@ _take_one_variant_property (NMBluezDevice *self, const char *property, GVariant 
 			_take_variant_property_address (self, v);
 		else if (!g_strcmp0 (property, "Connected"))
 			_take_variant_property_connected (self, v);
+		else if (!g_strcmp0 (property, "Paired"))
+			_take_variant_property_paired (self, v);
 		else if (!g_strcmp0 (property, "Name"))
 			_take_variant_property_name (self, v);
 		else if (!g_strcmp0 (property, "UUIDs"))
@@ -967,6 +982,7 @@ query_properties (NMBluezDevice *self)
 		g_object_freeze_notify (G_OBJECT (self));
 		_take_variant_property_address   (self, g_dbus_proxy_get_cached_property (priv->proxy, "Address"));
 		_take_variant_property_connected (self, g_dbus_proxy_get_cached_property (priv->proxy, "Connected"));
+		_take_variant_property_paired    (self, g_dbus_proxy_get_cached_property (priv->proxy, "Paired"));
 		_take_variant_property_name      (self, g_dbus_proxy_get_cached_property (priv->proxy, "Name"));
 		_take_variant_property_uuids     (self, g_dbus_proxy_get_cached_property (priv->proxy, "UUIDs"));
 		g_object_thaw_notify (G_OBJECT (self));
@@ -1203,7 +1219,7 @@ dispose (GObject *object)
 	if (to_delete) {
 		nm_log_dbg (LOGD_BT, "bluez[%s] removing Bluetooth connection for NAP device: '%s' (%s)", priv->path,
 		            nm_connection_get_id (to_delete), nm_connection_get_uuid (to_delete));
-		nm_settings_connection_delete (NM_SETTINGS_CONNECTION (to_delete), NULL, NULL);
+		nm_settings_connection_delete (NM_SETTINGS_CONNECTION (to_delete), NULL);
 		g_object_unref (to_delete);
 	}
 
@@ -1278,7 +1294,7 @@ nm_bluez_device_class_init (NMBluezDeviceClass *config_class)
 
 	g_object_class_install_properties (object_class, _PROPERTY_ENUMS_LAST, obj_properties);
 
-	signals[INITIALIZED] = g_signal_new ("initialized",
+	signals[INITIALIZED] = g_signal_new (NM_BLUEZ_DEVICE_INITIALIZED,
 	                                     G_OBJECT_CLASS_TYPE (object_class),
 	                                     G_SIGNAL_RUN_LAST,
 	                                     0,

@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <linux/rtnetlink.h>
 
 #include "nm-utils/nm-dedup-multi.h"
 #include "nm-utils.h"
@@ -35,12 +36,12 @@ static NMIP4Config *
 _ip4_config_from_options (int ifindex,
                           const char *iface,
                           GHashTable *options,
-                          guint32 priority)
+                          guint32 route_metric)
 {
 	nm_auto_unref_dedup_multi_index NMDedupMultiIndex *multi_idx = nm_dedup_multi_index_new ();
 	NMIP4Config *config;
 
-	config = nm_dhcp_utils_ip4_config_from_options (multi_idx, ifindex, iface, options, priority);
+	config = nm_dhcp_utils_ip4_config_from_options (multi_idx, ifindex, iface, options, RT_TABLE_MAIN, route_metric);
 	g_assert (config);
 	return config;
 }
@@ -56,7 +57,7 @@ fill_table (const Option *test_options, GHashTable *table)
 	const Option *opt;
 
 	if (!table)
-		table = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, NULL);
+		table = g_hash_table_new_full (nm_str_hash, g_str_equal, NULL, NULL);
 	for (opt = test_options; opt->name; opt++)
 		g_hash_table_insert (table, (gpointer) opt->name, (gpointer) opt->value);
 	return table;
@@ -105,7 +106,7 @@ test_generic_options (void)
 
 	/* IP4 address */
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (ip4_config), ==, 1);
-	address = _nmtst_nm_ip4_config_get_address (ip4_config, 0);
+	address = _nmtst_ip4_config_get_address (ip4_config, 0);
 	g_assert (inet_pton (AF_INET, expected_addr, &tmp) > 0);
 	g_assert (address->address == tmp);
 	g_assert (address->peer_address == tmp);
@@ -113,7 +114,7 @@ test_generic_options (void)
 
 	/* Gateway */
 	g_assert (inet_pton (AF_INET, expected_gw, &tmp) > 0);
-	g_assert (nm_ip4_config_get_gateway (ip4_config) == tmp);
+	g_assert (nmtst_ip4_config_get_gateway (ip4_config) == tmp);
 
 	g_assert_cmpint (nm_ip4_config_get_num_wins (ip4_config), ==, 0);
 
@@ -132,10 +133,10 @@ test_generic_options (void)
 	g_assert (nm_ip4_config_get_nameserver (ip4_config, 1) == tmp);
 
 	/* Routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 
 	/* Route #1 */
-	route = _nmtst_nm_ip4_config_get_route (ip4_config, 0);
+	route = _nmtst_ip4_config_get_route (ip4_config, 0);
 	g_assert (inet_pton (AF_INET, expected_route1_dest, &tmp) > 0);
 	g_assert (route->network == tmp);
 	g_assert (inet_pton (AF_INET, expected_route1_gw, &tmp) > 0);
@@ -144,12 +145,16 @@ test_generic_options (void)
 	g_assert_cmpint (route->metric, ==, 0);
 
 	/* Route #2 */
-	route = _nmtst_nm_ip4_config_get_route (ip4_config, 1);
-	g_assert (inet_pton (AF_INET, expected_route2_dest, &tmp) > 0);
-	g_assert (route->network == tmp);
-	g_assert (inet_pton (AF_INET, expected_route2_gw, &tmp) > 0);
-	g_assert (route->gateway == tmp);
+	route = _nmtst_ip4_config_get_route (ip4_config, 1);
+	g_assert (route->network == nmtst_inet4_from_string (expected_route2_dest));
+	g_assert (route->gateway == nmtst_inet4_from_string (expected_route2_gw));
 	g_assert_cmpint (route->plen, ==, 32);
+	g_assert_cmpint (route->metric, ==, 0);
+
+	route = _nmtst_ip4_config_get_route (ip4_config, 2);
+	g_assert (route->network == nmtst_inet4_from_string ("0.0.0.0"));
+	g_assert (route->gateway == nmtst_inet4_from_string ("192.168.1.1"));
+	g_assert_cmpint (route->plen, ==, 0);
 	g_assert_cmpint (route->metric, ==, 0);
 
 	g_hash_table_destroy (options);
@@ -175,7 +180,7 @@ test_wins_options (void)
 
 	/* IP4 address */
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (ip4_config), ==, 1);
-	address = _nmtst_nm_ip4_config_get_address (ip4_config, 0);
+	address = _nmtst_ip4_config_get_address (ip4_config, 0);
 	g_assert (address);
 	g_assert_cmpint (nm_ip4_config_get_num_wins (ip4_config), ==, 2);
 	g_assert (inet_pton (AF_INET, expected_wins1, &tmp) > 0);
@@ -221,7 +226,7 @@ ip4_test_route (NMIP4Config *ip4_config,
 
 	g_assert (expected_prefix <= 32);
 
-	route = _nmtst_nm_ip4_config_get_route (ip4_config, route_num);
+	route = _nmtst_ip4_config_get_route (ip4_config, route_num);
 	g_assert (inet_pton (AF_INET, expected_dest, &tmp) > 0);
 	g_assert (route->network == tmp);
 	g_assert (inet_pton (AF_INET, expected_gw, &tmp) > 0);
@@ -237,7 +242,7 @@ ip4_test_gateway (NMIP4Config *ip4_config, const char *expected_gw)
 
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (ip4_config), ==, 1);
 	g_assert (inet_pton (AF_INET, expected_gw, &tmp) > 0);
-	g_assert (nm_ip4_config_get_gateway (ip4_config) == tmp);
+	g_assert (nmtst_ip4_config_get_gateway (ip4_config) == tmp);
 }
 
 static void
@@ -260,9 +265,10 @@ test_classless_static_routes_1 (void)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
 	ip4_test_route (ip4_config, 1, expected_route2_dest, expected_route2_gw, 8);
+	ip4_test_route (ip4_config, 2, "0.0.0.0", "192.168.1.1", 0);
 
 	g_hash_table_destroy (options);
 }
@@ -287,9 +293,10 @@ test_classless_static_routes_2 (void)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
 	ip4_test_route (ip4_config, 1, expected_route2_dest, expected_route2_gw, 8);
+	ip4_test_route (ip4_config, 2, "0.0.0.0", expected_route1_gw, 0);
 
 	g_hash_table_destroy (options);
 }
@@ -315,9 +322,10 @@ test_fedora_dhclient_classless_static_routes (void)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 25);
 	ip4_test_route (ip4_config, 1, expected_route2_dest, expected_route2_gw, 7);
+	ip4_test_route (ip4_config, 2, "0.0.0.0", expected_route1_gw, 0);
 
 	/* Gateway */
 	ip4_test_gateway (ip4_config, expected_gateway);
@@ -347,8 +355,9 @@ test_dhclient_invalid_classless_routes_1 (void)
 	g_test_assert_expected_messages ();
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 1);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
+	ip4_test_route (ip4_config, 1, "0.0.0.0", expected_route1_gw, 0);
 
 	g_hash_table_destroy (options);
 }
@@ -379,9 +388,10 @@ test_dhcpcd_invalid_classless_routes_1 (void)
 	/* Test falling back to old-style static routes if the classless static
 	 * routes are invalid.
 	 */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 32);
 	ip4_test_route (ip4_config, 1, expected_route2_dest, expected_route2_gw, 32);
+	ip4_test_route (ip4_config, 2, "0.0.0.0", "192.168.1.1", 0);
 
 	g_hash_table_destroy (options);
 }
@@ -411,9 +421,10 @@ test_dhclient_invalid_classless_routes_2 (void)
 	/* Test falling back to old-style static routes if the classless static
 	 * routes are invalid.
 	 */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 32);
 	ip4_test_route (ip4_config, 1, expected_route2_dest, expected_route2_gw, 32);
+	ip4_test_route (ip4_config, 2, "0.0.0.0", "192.168.1.1", 0);
 
 	g_hash_table_destroy (options);
 }
@@ -445,9 +456,10 @@ test_dhcpcd_invalid_classless_routes_2 (void)
 	 */
 
 	/* Routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 3);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 32);
 	ip4_test_route (ip4_config, 1, expected_route2_dest, expected_route2_gw, 32);
+	ip4_test_route (ip4_config, 2, "0.0.0.0", "192.168.1.1", 0);
 
 	g_hash_table_destroy (options);
 }
@@ -473,8 +485,9 @@ test_dhclient_invalid_classless_routes_3 (void)
 	g_test_assert_expected_messages ();
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 1);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
+	ip4_test_route (ip4_config, 1, "0.0.0.0", expected_route1_gw, 0);
 
 	g_hash_table_destroy (options);
 }
@@ -500,8 +513,9 @@ test_dhcpcd_invalid_classless_routes_3 (void)
 	g_test_assert_expected_messages ();
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 1);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
+	ip4_test_route (ip4_config, 1, "0.0.0.0", expected_route1_gw, 0);
 
 	g_hash_table_destroy (options);
 }
@@ -524,8 +538,9 @@ test_dhclient_gw_in_classless_routes (void)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 1);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
+	ip4_test_route (ip4_config, 1, "0.0.0.0", "192.2.3.4", 0);
 
 	/* Gateway */
 	ip4_test_gateway (ip4_config, expected_gateway);
@@ -551,8 +566,9 @@ test_dhcpcd_gw_in_classless_routes (void)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	/* IP4 routes */
-	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 1);
+	g_assert_cmpint (nm_ip4_config_get_num_routes (ip4_config), ==, 2);
 	ip4_test_route (ip4_config, 0, expected_route1_dest, expected_route1_gw, 24);
+	ip4_test_route (ip4_config, 1, "0.0.0.0", "192.2.3.4", 0);
 
 	/* Gateway */
 	ip4_test_gateway (ip4_config, expected_gateway);
@@ -624,7 +640,7 @@ test_ip4_missing_prefix (const char *ip, guint32 expected_prefix)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (ip4_config), ==, 1);
-	address = _nmtst_nm_ip4_config_get_address (ip4_config, 0);
+	address = _nmtst_ip4_config_get_address (ip4_config, 0);
 	g_assert (address);
 	g_assert_cmpint (address->plen, ==, expected_prefix);
 
@@ -668,7 +684,7 @@ test_ip4_prefix_classless (void)
 	ip4_config = _ip4_config_from_options (1, "eth0", options, 0);
 
 	g_assert_cmpint (nm_ip4_config_get_num_addresses (ip4_config), ==, 1);
-	address = _nmtst_nm_ip4_config_get_address (ip4_config, 0);
+	address = _nmtst_ip4_config_get_address (ip4_config, 0);
 	g_assert (address);
 	g_assert_cmpint (address->plen, ==, 22);
 

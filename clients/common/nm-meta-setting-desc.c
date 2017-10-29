@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 
 #include "nm-common-macros.h"
+#include "nm-utils/nm-hash-utils.h"
 #include "nm-utils/nm-enum-utils.h"
 
 #include "NetworkManager.h"
@@ -188,7 +189,7 @@ _parse_ip_route (int family,
 			}
 
 			if (!attrs)
-				attrs = g_hash_table_new (g_str_hash, g_str_equal);
+				attrs = g_hash_table_new (nm_str_hash, g_str_equal);
 
 			g_hash_table_iter_init (&iter, tmp_attrs);
 			while (g_hash_table_iter_next (&iter, (gpointer *) &iter_key, (gpointer *) &iter_value)) {
@@ -590,15 +591,12 @@ _get_fcn_gobject (ARGS_GET_FCN)
 }
 
 static gconstpointer
-_get_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
-                           NMSetting *setting,
-                           NMMetaAccessorGetType get_type,
-                           const NMMetaUtilsIntValueInfo *value_infos,
-                           gpointer *out_to_free)
+_get_fcn_gobject_int (ARGS_GET_FCN)
 {
 	const GParamSpec *pspec;
 	nm_auto_unset_gvalue GValue gval = G_VALUE_INIT;
 	gint64 v;
+	const NMMetaUtilsIntValueInfo *value_infos;
 
 	RETURN_UNSUPPORTED_GET_TYPE ();
 
@@ -624,7 +622,8 @@ _get_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
 	}
 
 	if (   get_type == NM_META_ACCESSOR_GET_TYPE_PRETTY
-	    && value_infos) {
+	    && property_info->property_typ_data
+	    && (value_infos = property_info->property_typ_data->subtype.gobject_int.value_infos)) {
 		for (; value_infos->nick; value_infos++) {
 			if (value_infos->value == v) {
 				RETURN_STR_TO_FREE (g_strdup_printf ("%lli (%s)",
@@ -635,30 +634,6 @@ _get_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
 	}
 
 	RETURN_STR_TO_FREE (g_strdup_printf ("%"G_GINT64_FORMAT, v));
-}
-
-static gconstpointer
-_get_fcn_gobject_int (ARGS_GET_FCN)
-{
-	return _get_fcn_gobject_int_impl (property_info, setting, get_type,
-	                                  property_info->property_typ_data
-	                                      ? property_info->property_typ_data->subtype.gobject_int.value_infos
-	                                      : NULL,
-	                                  out_to_free);
-}
-
-static gconstpointer
-_get_fcn_gobject_dcb_priority (ARGS_GET_FCN)
-{
-	static const NMMetaUtilsIntValueInfo value_infos[] = {
-		{
-			.value = -1,
-			.nick = "unset",
-		},
-		{ 0 },
-	};
-
-	return _get_fcn_gobject_int_impl (property_info, setting, get_type, value_infos, out_to_free);
 }
 
 static gconstpointer
@@ -865,10 +840,7 @@ _set_fcn_gobject_bool (ARGS_SET_FCN)
 }
 
 static gboolean
-_set_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
-                           NMSetting *setting,
-                           const char *value,
-                           GError **error)
+_set_fcn_gobject_int (ARGS_SET_FCN)
 {
 	int errsv;
 	const GParamSpec *pspec;
@@ -944,21 +916,22 @@ _set_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
 		g_return_val_if_reached (FALSE);
 	}
 
-	if (!has_value)
+	if (!has_value) {
 		v = _nm_utils_ascii_str_to_int64 (value, base, min, max, 0);
 
-	if ((errsv = errno) != 0) {
-		if (errsv == ERANGE) {
-			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
-			             _("'%s' is out of range [%lli, %lli]"),
-			             value,
-			             (long long) min,
-			             (long long) max);
-		} else {
-			g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
-			             _("'%s' is not a valid number"), value);
+		if ((errsv = errno) != 0) {
+			if (errsv == ERANGE) {
+				g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+				             _("'%s' is out of range [%lli, %lli]"),
+				             value,
+				             (long long) min,
+				             (long long) max);
+			} else {
+				g_set_error (error, NM_UTILS_ERROR, NM_UTILS_ERROR_INVALID_ARGUMENT,
+				             _("'%s' is not a valid number"), value);
+			}
+			return FALSE;
 		}
-		return FALSE;
 	}
 
 	g_value_init (&gval, pspec->value_type);
@@ -985,12 +958,6 @@ _set_fcn_gobject_int_impl (const NMMetaPropertyInfo *property_info,
 		g_return_val_if_reached (FALSE);
 
 	return TRUE;
-}
-
-static gboolean
-_set_fcn_gobject_int (ARGS_SET_FCN)
-{
-	return _set_fcn_gobject_int_impl (property_info, setting, value, error);
 }
 
 static gboolean
@@ -2277,35 +2244,6 @@ _values_fcn_bond_options (ARGS_VALUES_FCN)
 }
 
 static gconstpointer
-_get_fcn_connection_autoconnect_retries (ARGS_GET_FCN)
-{
-	NMSettingConnection *s_con = NM_SETTING_CONNECTION (setting);
-	gint retries;
-	char *s;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	retries = nm_setting_connection_get_autoconnect_retries (s_con);
-	if (get_type != NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		s = g_strdup_printf ("%d", retries);
-	else {
-		switch (retries) {
-		case -1:
-			s = g_strdup_printf (_("%d (default)"), retries);
-			break;
-		case 0:
-			s = g_strdup_printf (_("%d (forever)"), retries);
-			break;
-		default:
-			s = g_strdup_printf ("%d", retries);
-			break;
-		}
-	}
-
-	RETURN_STR_TO_FREE (s);
-}
-
-static gconstpointer
 _get_fcn_connection_permissions (ARGS_GET_FCN)
 {
 	NMSettingConnection *s_con = NM_SETTING_CONNECTION (setting);
@@ -3074,7 +3012,7 @@ _get_fcn_ip_config_routes (ARGS_GET_FCN)
 	for (i = 0; i < num_routes; i++) {
 		gs_free char *attr_str = NULL;
 		gs_strfreev char **attr_names = NULL;
-		gs_unref_hashtable GHashTable *hash = g_hash_table_new (g_str_hash, g_str_equal);
+		gs_unref_hashtable GHashTable *hash = g_hash_table_new (nm_str_hash, g_str_equal);
 		int j;
 
 		route = nm_setting_ip_config_get_route (s_ip, i);
@@ -3127,28 +3065,6 @@ _get_fcn_ip_config_routes (ARGS_GET_FCN)
 	}
 
 	RETURN_STR_TO_FREE (g_string_free (printable, FALSE));
-}
-
-static gconstpointer
-_get_fcn_ip4_config_dad_timeout (ARGS_GET_FCN)
-{
-	NMSettingIPConfig *s_ip = NM_SETTING_IP_CONFIG (setting);
-	gint dad_timeout;
-
-	RETURN_UNSUPPORTED_GET_TYPE ();
-
-	dad_timeout = nm_setting_ip_config_get_dad_timeout (s_ip);
-	if (get_type != NM_META_ACCESSOR_GET_TYPE_PRETTY)
-		RETURN_STR_TO_FREE (g_strdup_printf ("%d", dad_timeout));
-
-	switch (dad_timeout) {
-	case -1:
-		RETURN_STR_TO_FREE (g_strdup_printf (_("%d (default)"), dad_timeout));
-	case 0:
-		RETURN_STR_TO_FREE (g_strdup_printf (_("%d (off)"), dad_timeout));
-	default:
-		RETURN_STR_TO_FREE (g_strdup_printf ("%d", dad_timeout));
-	}
 }
 
 static const char *ipv4_valid_methods[] = {
@@ -4458,11 +4374,6 @@ static const NMMetaPropertyType _pt_gobject_mtu = {
 	.set_fcn =                      _set_fcn_gobject_mtu,
 };
 
-static const NMMetaPropertyType _pt_gobject_dcb_priority = {
-	.get_fcn =                      _get_fcn_gobject_dcb_priority,
-	.set_fcn =                      _set_fcn_gobject_int,
-};
-
 static const NMMetaPropertyType _pt_gobject_mac = {
 	.get_fcn =                      _get_fcn_gobject,
 	.set_fcn =                      _set_fcn_gobject_mac,
@@ -4528,6 +4439,17 @@ static const NMMetaPropertyType _pt_gobject_devices = {
 	   "Examples: set team.config " \
 	   "{ \"device\": \"team0\", \"runner\": {\"name\": \"roundrobin\"}, \"ports\": {\"eth1\": {}, \"eth2\": {}} }\n" \
 	   "          set team.config /etc/my-team.conf\n")
+
+#define DEFINE_DCB_PROPRITY_PROPERTY_TYPE \
+		.property_type =                &_pt_gobject_int, \
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_int, \
+			.value_infos =              INT_VALUE_INFOS ( \
+				{ \
+					.value = -1, \
+					.nick = "unset", \
+				} \
+			), \
+		),
 
 #define _CURRENT_NM_META_SETTING_TYPE NM_META_SETTING_TYPE_802_1X
 static const NMMetaPropertyInfo *const property_infos_802_1X[] = {
@@ -5033,9 +4955,18 @@ static const NMMetaPropertyInfo *const property_infos_CONNECTION[] = {
 		.property_type =                &_pt_gobject_int,
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_AUTOCONNECT_RETRIES,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_connection_autoconnect_retries,
-			.set_fcn =                  _set_fcn_gobject_int,
+		.property_type =                &_pt_gobject_int,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_int,
+			.value_infos =              INT_VALUE_INFOS (
+				{
+					.value = -1,
+					.nick = "default",
+				},
+				{
+					.value = 0,
+					.nick = "forever",
+				}
+			),
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_CONNECTION_TIMESTAMP,
@@ -5145,7 +5076,7 @@ static const NMMetaPropertyInfo *const property_infos_DCB[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FCOE_PRIORITY,
-		.property_type =                &_pt_gobject_dcb_priority,
+		DEFINE_DCB_PROPRITY_PROPERTY_TYPE
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FCOE_MODE,
 		.property_type =                &_pt_gobject_string,
@@ -5161,7 +5092,7 @@ static const NMMetaPropertyInfo *const property_infos_DCB[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_ISCSI_PRIORITY,
-		.property_type =                &_pt_gobject_dcb_priority,
+		DEFINE_DCB_PROPRITY_PROPERTY_TYPE
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FIP_FLAGS,
 		.property_type = DEFINE_PROPERTY_TYPE (
@@ -5170,7 +5101,7 @@ static const NMMetaPropertyInfo *const property_infos_DCB[] = {
 		),
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_APP_FIP_PRIORITY,
-		.property_type =                &_pt_gobject_dcb_priority,
+		DEFINE_DCB_PROPRITY_PROPERTY_TYPE
 	),
 	PROPERTY_INFO_WITH_DESC (NM_SETTING_DCB_PRIORITY_FLOW_CONTROL_FLAGS,
 		.property_type = DEFINE_PROPERTY_TYPE (
@@ -5423,6 +5354,21 @@ static const NMMetaPropertyInfo *const property_infos_IP4_CONFIG[] = {
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_ROUTE_METRIC, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_ROUTE_METRIC,
 		.property_type =                &_pt_gobject_int,
 	),
+	PROPERTY_INFO (NM_SETTING_IP_CONFIG_ROUTE_TABLE, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_ROUTE_TABLE,
+		.property_type =                &_pt_gobject_int,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_int,
+			.value_infos = INT_VALUE_INFOS (
+				{
+					.value = 0,
+					.nick = "unspec",
+				},
+				{
+					.value = 254,
+					.nick = "main",
+				}
+			),
+		),
+	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_IGNORE_AUTO_ROUTES, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_IGNORE_AUTO_ROUTES,
 		.property_type =                &_pt_gobject_bool,
 	),
@@ -5434,6 +5380,18 @@ static const NMMetaPropertyInfo *const property_infos_IP4_CONFIG[] = {
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_DHCP_TIMEOUT, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_DHCP_TIMEOUT,
 		.property_type =                &_pt_gobject_int,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_int,
+			.value_infos =          INT_VALUE_INFOS (
+				{
+					.value = 0,
+					.nick = "default",
+				},
+				{
+					.value = G_MAXINT32,
+					.nick = "infinity",
+				}
+			),
+		),
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_DHCP_SEND_HOSTNAME, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_DHCP_SEND_HOSTNAME,
 		.property_type =                &_pt_gobject_bool,
@@ -5451,9 +5409,18 @@ static const NMMetaPropertyInfo *const property_infos_IP4_CONFIG[] = {
 		.property_type =                &_pt_gobject_bool,
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_DAD_TIMEOUT, DESCRIBE_DOC_NM_SETTING_IP4_CONFIG_DAD_TIMEOUT,
-		.property_type = DEFINE_PROPERTY_TYPE (
-			.get_fcn =                  _get_fcn_ip4_config_dad_timeout,
-			.set_fcn =                  _set_fcn_gobject_int,
+		.property_type =                &_pt_gobject_int,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_int,
+			.value_infos =              INT_VALUE_INFOS (
+				{
+					.value = -1,
+					.nick = "default",
+				},
+				{
+					.value = 0,
+					.nick = "off",
+				}
+			),
 		),
 	),
 	NULL
@@ -5549,6 +5516,21 @@ static const NMMetaPropertyInfo *const property_infos_IP6_CONFIG[] = {
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_ROUTE_METRIC, DESCRIBE_DOC_NM_SETTING_IP6_CONFIG_ROUTE_METRIC,
 		.property_type =                &_pt_gobject_int,
+	),
+	PROPERTY_INFO (NM_SETTING_IP_CONFIG_ROUTE_TABLE, DESCRIBE_DOC_NM_SETTING_IP6_CONFIG_ROUTE_TABLE,
+		.property_type =                &_pt_gobject_int,
+		.property_typ_data = DEFINE_PROPERTY_TYP_DATA_SUBTYPE (gobject_int,
+			.value_infos =          INT_VALUE_INFOS (
+				{
+					.value = 0,
+					.nick = "unspec",
+				},
+				{
+					.value = 254,
+					.nick = "main",
+				}
+			),
+		),
 	),
 	PROPERTY_INFO (NM_SETTING_IP_CONFIG_IGNORE_AUTO_ROUTES, DESCRIBE_DOC_NM_SETTING_IP6_CONFIG_IGNORE_AUTO_ROUTES,
 		.property_type =                &_pt_gobject_bool,

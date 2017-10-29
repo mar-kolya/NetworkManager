@@ -3,7 +3,7 @@ AC_PREREQ([2.63])
 dnl The NM version number
 m4_define([nm_major_version], [1])
 m4_define([nm_minor_version], [9])
-m4_define([nm_micro_version], [2])
+m4_define([nm_micro_version], [3])
 m4_define([nm_version],
           [nm_major_version.nm_minor_version.nm_micro_version])
 
@@ -68,6 +68,22 @@ AC_CHECK_DECLS([
 	[], [], [[
 #include <string.h>
 ]])
+
+AC_CHECK_HEADERS(sys/auxv.h)
+
+AC_CHECK_DECLS([getrandom],
+               [AC_DEFINE([USE_SYS_RANDOM_H], [1], [sys/random.h is usable])
+                AC_DEFINE([HAVE_GETRANDOM], [1], [has getrandom])
+               ],
+               [AC_CHECK_DECLS([getrandom],
+                               [AC_DEFINE([USE_SYS_RANDOM_H], [0], [sys/random.h is usable])
+                                AC_DEFINE([HAVE_GETRANDOM], [1], [has getrandom])],
+                               [AC_DEFINE([USE_SYS_RANDOM_H], [0], [sys/random.h is usable])
+                                AC_DEFINE([HAVE_GETRANDOM], [0], [has getrandom])],
+                               [[#include <linux/random.h>
+                                 ]])],
+               [[#include <sys/random.h>
+                 ]])
 
 dnl
 dnl translation support

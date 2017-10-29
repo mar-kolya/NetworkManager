@@ -129,16 +129,14 @@ typedef enum {
 	 */
 	NM_PLATFORM_IP_ROUTE_CMP_TYPE_ID,
 
-	/* NMIP4Config and NMIP6Config also track a list of routes. They have their
-	 * own notion of what equality means. Basically, they consider network/plen
-	 * for IPv4 and IPv6. */
-	NM_PLATFORM_IP_ROUTE_CMP_TYPE_DST,
-
 	/* compare all fields as they make sense for kernel. For example,
 	 * a route destination 192.168.1.5/24 is not accepted by kernel and
 	 * we treat it identical to 192.168.1.0/24. Semantically these
 	 * routes are identical, but NM_PLATFORM_IP_ROUTE_CMP_TYPE_FULL will
-	 * report them as different. */
+	 * report them as different.
+	 *
+	 * The result shall be identical to call first nm_platform_ip_route_normalize()
+	 * on both routes and then doing a full comparison. */
 	NM_PLATFORM_IP_ROUTE_CMP_TYPE_SEMANTICALLY,
 
 	/* compare all fields. This should have the same effect as memcmp(),
@@ -168,6 +166,7 @@ typedef enum { /*< skip >*/
 	NM_PLATFORM_ERROR_NO_FIRMWARE,
 	NM_PLATFORM_ERROR_OPNOTSUPP,
 	NM_PLATFORM_ERROR_NETLINK,
+	NM_PLATFORM_ERROR_CANT_SET_MTU,
 } NMPlatformError;
 
 #define NM_PLATFORM_LINK_OTHER_NETNS    (-1)
@@ -428,7 +427,7 @@ typedef union {
 	 *
 	 * This is not the original table ID. Instead, 254 (RT_TABLE_MAIN) and
 	 * zero (RT_TABLE_UNSPEC) are swapped, so that the default is the main
-	 * table. Use nm_platform_route_table_coerce(). */ \
+	 * table. Use nm_platform_route_table_coerce()/nm_platform_route_table_uncoerce(). */ \
 	guint32 table_coerced; \
 	\
 	/*end*/
@@ -519,6 +518,12 @@ struct _NMPlatformIP6Route {
 	 */
 	struct in6_addr src;
 	guint8 src_plen;
+
+	/* RTA_PREF router preference.
+	 *
+	 * The type is guint8 to keep the struct size small. But the values are compatible with
+	 * the NMIcmpv6RouterPref enum. */
+	guint8 rt_pref;
 };
 
 typedef union {
@@ -612,11 +617,11 @@ typedef struct {
 	in_addr_t local;
 	in_addr_t remote;
 	int parent_ifindex;
+	guint16 flags;
 	guint8 ttl;
 	guint8 tos;
 	guint8 proto;
 	bool path_mtu_discovery:1;
-	guint16 flags;
 } NMPlatformLnkSit;
 
 typedef struct {
@@ -660,6 +665,12 @@ typedef enum {
 	NM_PLATFORM_LINK_DUPLEX_HALF,
 	NM_PLATFORM_LINK_DUPLEX_FULL,
 } NMPlatformLinkDuplexType;
+
+typedef enum {
+	NM_PLATFORM_KERNEL_SUPPORT_EXTENDED_IFA_FLAGS               = (1LL <<  0),
+	NM_PLATFORM_KERNEL_SUPPORT_USER_IPV6LL                      = (1LL <<  1),
+	NM_PLATFORM_KERNEL_SUPPORT_RTA_PREF                         = (1LL <<  2),
+} NMPlatformKernelSupportFlags;
 
 /*****************************************************************************/
 
@@ -708,7 +719,7 @@ typedef struct {
 	                                        guint8 *buf,
 	                                        size_t *length);
 	NMPlatformError (*link_set_address) (NMPlatform *, int ifindex, gconstpointer address, size_t length);
-	gboolean (*link_set_mtu) (NMPlatform *, int ifindex, guint32 mtu);
+	NMPlatformError (*link_set_mtu) (NMPlatform *, int ifindex, guint32 mtu);
 	gboolean (*link_set_name) (NMPlatform *, int ifindex, const char *name);
 	gboolean (*link_set_sriov_num_vfs) (NMPlatform *, int ifindex, guint num_vfs);
 
@@ -823,10 +834,11 @@ typedef struct {
 	NMPlatformError (*ip_route_get) (NMPlatform *self,
 	                                 int addr_family,
 	                                 gconstpointer address,
+	                                 int oif_ifindex,
 	                                 NMPObject **out_route);
 
-	gboolean (*check_support_kernel_extended_ifa_flags) (NMPlatform *);
-	gboolean (*check_support_user_ipv6ll) (NMPlatform *);
+	NMPlatformKernelSupportFlags (*check_kernel_support) (NMPlatform * self,
+	                                                      NMPlatformKernelSupportFlags request_flags);
 } NMPlatformClass;
 
 /* NMPlatform signals
@@ -861,15 +873,21 @@ NMPlatform *nm_platform_get (void);
 
 /**
  * nm_platform_route_table_coerce:
- * @table: the route table, either its original value, or its coerced.
+ * @table: the route table, in its original value as received
+ *   from rtm_table/RTA_TABLE.
  *
- * Returns: returns the coerced table id. If the table id is like
- *   RTA_TABLE, it returns a value for NMPlatformIPRoute.table_coerced
- *   and vice versa.
+ * Returns: returns the coerced table id, that can be stored in
+ *   NMPlatformIPRoute.table_coerced.
  */
 static inline guint32
 nm_platform_route_table_coerce (guint32 table)
 {
+	/* For kernel, the default table is RT_TABLE_MAIN (254).
+	 * We want that in NMPlatformIPRoute.table_coerced a numeric
+	 * zero is the default. Hence, @table_coerced swaps the
+	 * value 0 and 254. Use nm_platform_route_table_coerce()
+	 * and nm_platform_route_table_uncoerce() to convert between
+	 * the two domains. */
 	switch (table) {
 	case 0 /* RT_TABLE_UNSPEC */:
 		return 254;
@@ -878,6 +896,45 @@ nm_platform_route_table_coerce (guint32 table)
 	default:
 		return table;
 	}
+}
+
+/**
+ * nm_platform_route_table_uncoerce:
+ * @table: the route table, in its coerced value
+ * @normalize: whether to normalize RT_TABLE_UNSPEC to
+ *   RT_TABLE_MAIN. For kernel, routes with a table id
+ *   RT_TABLE_UNSPEC do not exist and are treated like
+ *   RT_TABLE_MAIN.
+ *
+ * Returns: reverts the coerced table ID in NMPlatformIPRoute.table_coerced
+ *   to the original value as kernel understands it.
+ */
+static inline guint32
+nm_platform_route_table_uncoerce (guint32 table_coerced, gboolean normalize)
+{
+	/* this undoes nm_platform_route_table_coerce().  */
+	switch (table_coerced) {
+	case 0 /* RT_TABLE_UNSPEC */:
+		return 254;
+	case 254 /* RT_TABLE_MAIN */:
+		return normalize ? 254 : 0;
+	default:
+		return table_coerced;
+	}
+}
+
+static inline gboolean
+nm_platform_route_table_is_main (guint32 table)
+{
+	/* same as
+	 *   nm_platform_route_table_uncoerce (table, TRUE) == RT_TABLE_MAIN
+	 * and
+	 *   nm_platform_route_table_uncoerce (nm_platform_route_table_coerce (table), TRUE) == RT_TABLE_MAIN
+	 *
+	 * That is, the function operates the same on @table and its coerced
+	 * form.
+	 */
+	return table == 0 || table == 254;
 }
 
 /**
@@ -958,10 +1015,10 @@ struct _NMPLookup;
 const struct _NMDedupMultiHeadEntry *nm_platform_lookup (NMPlatform *platform,
                                                          const struct _NMPLookup *lookup);
 
+gboolean nm_platform_lookup_predicate_routes_main (const NMPObject *obj,
+                                                   gpointer user_data);
 gboolean nm_platform_lookup_predicate_routes_main_skip_rtprot_kernel (const NMPObject *obj,
                                                                       gpointer user_data);
-gboolean nm_platform_lookup_predicate_routes_skip_rtprot_kernel (const NMPObject *obj,
-                                                                 gpointer user_data);
 
 GPtrArray *nm_platform_lookup_clone (NMPlatform *platform,
                                      const struct _NMPLookup *lookup,
@@ -1004,7 +1061,7 @@ gboolean nm_platform_link_set_ipv6_token (NMPlatform *self, int ifindex, NMUtils
 
 gboolean nm_platform_link_get_permanent_address (NMPlatform *self, int ifindex, guint8 *buf, size_t *length);
 NMPlatformError nm_platform_link_set_address (NMPlatform *self, int ifindex, const void *address, size_t length);
-gboolean nm_platform_link_set_mtu (NMPlatform *self, int ifindex, guint32 mtu);
+NMPlatformError nm_platform_link_set_mtu (NMPlatform *self, int ifindex, guint32 mtu);
 gboolean nm_platform_link_set_name (NMPlatform *self, int ifindex, const char *name);
 gboolean nm_platform_link_set_sriov_num_vfs (NMPlatform *self, int ifindex, guint num_vfs);
 
@@ -1173,12 +1230,18 @@ NMPlatformError nm_platform_ip6_route_add (NMPlatform *self, NMPNlmFlags flags, 
 
 gboolean nm_platform_ip_route_delete (NMPlatform *self, const NMPObject *route);
 
+GPtrArray *nm_platform_ip_route_get_prune_list (NMPlatform *self,
+                                                int addr_family,
+                                                int ifindex,
+                                                NMIPRouteTableSyncMode route_table_sync);
+
 gboolean nm_platform_ip_route_sync (NMPlatform *self,
                                     int addr_family,
                                     int ifindex,
                                     GPtrArray *routes,
-                                    NMPObjectPredicateFunc kernel_delete_predicate,
-                                    gpointer kernel_delete_userdata);
+                                    GPtrArray *routes_prune,
+                                    GPtrArray **out_temporary_not_available);
+
 gboolean nm_platform_ip_route_flush (NMPlatform *self,
                                      int addr_family,
                                      int ifindex);
@@ -1186,6 +1249,7 @@ gboolean nm_platform_ip_route_flush (NMPlatform *self,
 NMPlatformError nm_platform_ip_route_get (NMPlatform *self,
                                           int addr_family,
                                           gconstpointer address,
+                                          int oif_ifindex,
                                           NMPObject **out_route);
 
 const char *nm_platform_link_to_string (const NMPlatformLink *link, char *buf, gsize len);
@@ -1237,35 +1301,23 @@ nm_platform_ip6_route_cmp_full (const NMPlatformIP6Route *a, const NMPlatformIP6
 	return nm_platform_ip6_route_cmp (a, b, NM_PLATFORM_IP_ROUTE_CMP_TYPE_FULL);
 }
 
-guint nm_platform_link_hash (const NMPlatformLink *obj);
-guint nm_platform_ip4_address_hash (const NMPlatformIP4Address *obj);
-guint nm_platform_ip6_address_hash (const NMPlatformIP6Address *obj);
-guint nm_platform_ip4_route_hash (const NMPlatformIP4Route *obj, NMPlatformIPRouteCmpType cmp_type);
-guint nm_platform_ip6_route_hash (const NMPlatformIP6Route *obj, NMPlatformIPRouteCmpType cmp_type);
-guint nm_platform_lnk_gre_hash (const NMPlatformLnkGre *obj);
-guint nm_platform_lnk_infiniband_hash (const NMPlatformLnkInfiniband *obj);
-guint nm_platform_lnk_ip6tnl_hash (const NMPlatformLnkIp6Tnl *obj);
-guint nm_platform_lnk_ipip_hash (const NMPlatformLnkIpIp *obj);
-guint nm_platform_lnk_macsec_hash (const NMPlatformLnkMacsec *obj);
-guint nm_platform_lnk_macvlan_hash (const NMPlatformLnkMacvlan *obj);
-guint nm_platform_lnk_sit_hash (const NMPlatformLnkSit *obj);
-guint nm_platform_lnk_vlan_hash (const NMPlatformLnkVlan *obj);
-guint nm_platform_lnk_vxlan_hash (const NMPlatformLnkVxlan *obj);
+void nm_platform_link_hash_update (const NMPlatformLink *obj, NMHashState *h);
+void nm_platform_ip4_address_hash_update (const NMPlatformIP4Address *obj, NMHashState *h);
+void nm_platform_ip6_address_hash_update (const NMPlatformIP6Address *obj, NMHashState *h);
+void nm_platform_ip4_route_hash_update (const NMPlatformIP4Route *obj, NMPlatformIPRouteCmpType cmp_type, NMHashState *h);
+void nm_platform_ip6_route_hash_update (const NMPlatformIP6Route *obj, NMPlatformIPRouteCmpType cmp_type, NMHashState *h);
+void nm_platform_lnk_gre_hash_update (const NMPlatformLnkGre *obj, NMHashState *h);
+void nm_platform_lnk_infiniband_hash_update (const NMPlatformLnkInfiniband *obj, NMHashState *h);
+void nm_platform_lnk_ip6tnl_hash_update (const NMPlatformLnkIp6Tnl *obj, NMHashState *h);
+void nm_platform_lnk_ipip_hash_update (const NMPlatformLnkIpIp *obj, NMHashState *h);
+void nm_platform_lnk_macsec_hash_update (const NMPlatformLnkMacsec *obj, NMHashState *h);
+void nm_platform_lnk_macvlan_hash_update (const NMPlatformLnkMacvlan *obj, NMHashState *h);
+void nm_platform_lnk_sit_hash_update (const NMPlatformLnkSit *obj, NMHashState *h);
+void nm_platform_lnk_vlan_hash_update (const NMPlatformLnkVlan *obj, NMHashState *h);
+void nm_platform_lnk_vxlan_hash_update (const NMPlatformLnkVxlan *obj, NMHashState *h);
 
-static inline guint
-nm_platform_ip4_route_hash_full (const NMPlatformIP4Route *obj)
-{
-	return nm_platform_ip4_route_hash (obj, NM_PLATFORM_IP_ROUTE_CMP_TYPE_FULL);
-}
-
-static inline guint
-nm_platform_ip6_route_hash_full (const NMPlatformIP6Route *obj)
-{
-	return nm_platform_ip6_route_hash (obj, NM_PLATFORM_IP_ROUTE_CMP_TYPE_FULL);
-}
-
-gboolean nm_platform_check_support_kernel_extended_ifa_flags (NMPlatform *self);
-gboolean nm_platform_check_support_user_ipv6ll (NMPlatform *self);
+NMPlatformKernelSupportFlags nm_platform_check_kernel_support (NMPlatform *self,
+                                                               NMPlatformKernelSupportFlags request_flags);
 
 const char *nm_platform_link_flags2str (unsigned flags, char *buf, gsize len);
 const char *nm_platform_link_inet6_addrgenmode2str (guint8 mode, char *buf, gsize len);

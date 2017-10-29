@@ -39,6 +39,8 @@
 
 %global snap %{?snapshot_dot}%{?git_sha_dot}
 
+%global real_version_major %(printf '%s' '%{real_version}' | sed -n 's/^\\([1-9][0-9]*\\.[1-9][0-9]*\\)\\.[1-9][0-9]*$/\\1/p')
+
 %global is_devel_build %(printf '%s' '%{real_version}' | sed -n 's/^1\\.\\([0-9]*[13579]\\)\\..*/1/p')
 
 ###############################################################################
@@ -86,6 +88,7 @@ Group: System Environment/Base
 License: GPLv2+
 URL: http://www.gnome.org/projects/NetworkManager/
 
+#Source: https://download.gnome.org/sources/NetworkManager/%{real_version_major}/%{name}-%{real_version}.tar.xz
 Source: __SOURCE1__
 Source1: NetworkManager.conf
 Source2: 00-server.conf
@@ -370,8 +373,13 @@ intltoolize --automake --copy --force
 	--disable-static \
 	--with-dhclient=yes \
 	--with-dhcpcd=no \
+	--with-config-dhcp-default=dhclient \
 	--with-crypto=nss \
+%if %{with test}
 	--enable-more-warnings=error \
+%else
+	--enable-more-warnings=yes \
+%endif
 %if %{with sanitizer}
 	--enable-address-sanitizer \
 	--enable-undefined-sanitizer \
@@ -481,6 +489,16 @@ cp valgrind.suppressions %{buildroot}%{_prefix}/src/debug/NetworkManager-%{real_
 %if %{with test}
 make %{?_smp_mflags} check
 %endif
+
+
+%pre
+if [ -f "%{systemd_dir}/network-online.target.wants/NetworkManager-wait-online.service" ] ; then
+    # older versions used to install this file, effectively always enabling
+    # NetworkManager-wait-online.service. We no longer do that and rely on
+    # preset.
+    # But on package upgrade we must explicitly enable it (rh#1455704).
+    systemctl enable NetworkManager-wait-online.service || :
+fi
 
 
 %post

@@ -28,11 +28,11 @@
 #include <linux/random.h>
 #include <stdint.h>
 
-#ifdef HAVE_SYS_AUXV_H
+#if HAVE_SYS_AUXV_H
 #  include <sys/auxv.h>
 #endif
 
-#ifdef USE_SYS_RANDOM_H
+#if USE_SYS_RANDOM_H
 #  include <sys/random.h>
 #else
 #  include <linux/random.h>
@@ -45,7 +45,6 @@
 #include "time-util.h"
 
 int acquire_random_bytes(void *p, size_t n, bool high_quality_required) {
-#if 0 /* NM_IGNORED */
         static int have_syscall = -1;
 
         _cleanup_close_ int fd = -1;
@@ -61,7 +60,14 @@ int acquire_random_bytes(void *p, size_t n, bool high_quality_required) {
 
         /* Use the getrandom() syscall unless we know we don't have it. */
         if (have_syscall != 0) {
+#if !HAVE_GETRANDOM
+                /* XXX: NM: systemd calls the syscall directly in this case. Don't add that workaround.
+                 * If you don't compile against a libc that provides getrandom(), you don't get it. */
+                r = -1;
+                errno = ENOSYS;
+#else
                 r = getrandom(p, n, GRND_NONBLOCK);
+#endif
                 if (r > 0) {
                         have_syscall = true;
                         if ((size_t) r == n)
@@ -92,10 +98,6 @@ int acquire_random_bytes(void *p, size_t n, bool high_quality_required) {
                 } else
                         return -errno;
         }
-#else /* NM_IGNORED */
-        _cleanup_close_ int fd = -1;
-        unsigned already_done = 0;
-#endif /* NM_IGNORED */
 
         fd = open("/dev/urandom", O_RDONLY|O_CLOEXEC|O_NOCTTY);
         if (fd < 0)
@@ -107,14 +109,14 @@ int acquire_random_bytes(void *p, size_t n, bool high_quality_required) {
 void initialize_srand(void) {
         static bool srand_called = false;
         unsigned x;
-#ifdef HAVE_SYS_AUXV_H
+#if HAVE_SYS_AUXV_H
         void *auxv;
 #endif
 
         if (srand_called)
                 return;
 
-#ifdef HAVE_SYS_AUXV_H
+#if HAVE_SYS_AUXV_H
         /* The kernel provides us with 16 bytes of entropy in auxv, so let's
          * try to make use of that to seed the pseudo-random generator. It's
          * better than nothing... */

@@ -32,12 +32,14 @@
 #include <libintl.h>
 #include <gmodule.h>
 #include <sys/stat.h>
+#include <net/if.h>
 
 #if WITH_JANSSON
 #include <jansson.h>
 #endif
 
 #include "nm-utils/nm-enum-utils.h"
+#include "nm-utils/nm-hash-utils.h"
 #include "nm-common-macros.h"
 #include "nm-utils-private.h"
 #include "nm-setting-private.h"
@@ -59,85 +61,79 @@
  * access points and devices, among other things.
  */
 
-struct EncodingTriplet
-{
-	const char *encoding1;
-	const char *encoding2;
-	const char *encoding3;
-};
-
 struct IsoLangToEncodings
 {
-	const char *	lang;
-	struct EncodingTriplet encodings;
+	const char *lang;
+	const char *const *encodings;
 };
+
+#define LANG_ENCODINGS(l, ...) { .lang = l, .encodings = (const char *[]) { __VA_ARGS__, NULL }}
 
 /* 5-letter language codes */
 static const struct IsoLangToEncodings isoLangEntries5[] =
 {
 	/* Simplified Chinese */
-	{ "zh_cn",	{"euc-cn",	"gb2312",			"gb18030"} },	/* PRC */
-	{ "zh_sg",	{"euc-cn",	"gb2312",			"gb18030"} },	/* Singapore */
+	LANG_ENCODINGS ("zh_cn",   "euc-cn", "gb2312", "gb18030"),         /* PRC */
+	LANG_ENCODINGS ("zh_sg",   "euc-cn", "gb2312", "gb18030"),         /* Singapore */
 
 	/* Traditional Chinese */
-	{ "zh_tw",	{"big5",		"euc-tw",			NULL} },		/* Taiwan */
-	{ "zh_hk",	{"big5",		"euc-tw",			"big5-hkcs"} },/* Hong Kong */
-	{ "zh_mo",	{"big5",		"euc-tw",			NULL} },		/* Macau */
+	LANG_ENCODINGS ("zh_tw",   "big5", "euc-tw"),                      /* Taiwan */
+	LANG_ENCODINGS ("zh_hk",   "big5", "euc-tw", "big5-hkcs"),         /* Hong Kong */
+	LANG_ENCODINGS ("zh_mo",   "big5", "euc-tw"),                      /* Macau */
 
-	/* Table end */
-	{ NULL, {NULL, NULL, NULL} }
+	LANG_ENCODINGS (NULL, NULL)
 };
 
 /* 2-letter language codes; we don't care about the other 3 in this table */
 static const struct IsoLangToEncodings isoLangEntries2[] =
 {
 	/* Japanese */
-	{ "ja",		{"euc-jp",	"shift_jis",		"iso-2022-jp"} },
+	LANG_ENCODINGS ("ja",      "euc-jp", "shift_jis", "iso-2022-jp"),
 
 	/* Korean */
-	{ "ko",		{"euc-kr",	"iso-2022-kr",		"johab"} },
+	LANG_ENCODINGS ("ko",      "euc-kr", "iso-2022-kr", "johab"),
 
 	/* Thai */
-	{ "th",		{"iso-8859-11","windows-874",		NULL} },
+	LANG_ENCODINGS ("th",      "iso-8859-11", "windows-874"),
 
 	/* Central European */
-	{ "hu",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Hungarian */
-	{ "cs",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Czech */
-	{ "hr",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Croatian */
-	{ "pl",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Polish */
-	{ "ro",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Romanian */
-	{ "sk",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Slovakian */
-	{ "sl",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Slovenian */
-	{ "sh",		{"iso-8859-2",	"windows-1250",	NULL} },	/* Serbo-Croatian */
+	LANG_ENCODINGS ("hu",      "iso-8859-2", "windows-1250"),          /* Hungarian */
+	LANG_ENCODINGS ("cs",      "iso-8859-2", "windows-1250"),          /* Czech */
+	LANG_ENCODINGS ("hr",      "iso-8859-2", "windows-1250"),          /* Croatian */
+	LANG_ENCODINGS ("pl",      "iso-8859-2", "windows-1250"),          /* Polish */
+	LANG_ENCODINGS ("ro",      "iso-8859-2", "windows-1250"),          /* Romanian */
+	LANG_ENCODINGS ("sk",      "iso-8859-2", "windows-1250"),          /* Slovakian */
+	LANG_ENCODINGS ("sl",      "iso-8859-2", "windows-1250"),          /* Slovenian */
+	LANG_ENCODINGS ("sh",      "iso-8859-2", "windows-1250"),          /* Serbo-Croatian */
 
 	/* Cyrillic */
-	{ "ru",		{"koi8-r",	"windows-1251",	"iso-8859-5"} },	/* Russian */
-	{ "be",		{"koi8-r",	"windows-1251",	"iso-8859-5"} },	/* Belorussian */
-	{ "bg",		{"windows-1251","koi8-r",		"iso-8859-5"} },	/* Bulgarian */
-	{ "mk",		{"koi8-r",	"windows-1251",	"iso-8859-5"} },	/* Macedonian */
-	{ "sr",		{"koi8-r",	"windows-1251",	"iso-8859-5"} },	/* Serbian */
-	{ "uk",		{"koi8-u",	"koi8-r",			"windows-1251"} },	/* Ukranian */
+	LANG_ENCODINGS ("ru",      "koi8-r", "windows-1251","iso-8859-5"), /* Russian */
+	LANG_ENCODINGS ("be",      "koi8-r", "windows-1251","iso-8859-5"), /* Belorussian */
+	LANG_ENCODINGS ("bg",      "windows-1251","koi8-r", "iso-8859-5"), /* Bulgarian */
+	LANG_ENCODINGS ("mk",      "koi8-r", "windows-1251", "iso-8859-5"),/* Macedonian */
+	LANG_ENCODINGS ("sr",      "koi8-r", "windows-1251", "iso-8859-5"),/* Serbian */
+	LANG_ENCODINGS ("uk",      "koi8-u", "koi8-r", "windows-1251"),    /* Ukranian */
 
 	/* Arabic */
-	{ "ar",		{"iso-8859-6",	"windows-1256",	NULL} },
+	LANG_ENCODINGS ("ar",      "iso-8859-6","windows-1256"),
 
 	/* Baltic */
-	{ "et",		{"iso-8859-4",	"windows-1257",	NULL} },	/* Estonian */
-	{ "lt",		{"iso-8859-4",	"windows-1257",	NULL} },	/* Lithuanian */
-	{ "lv",		{"iso-8859-4",	"windows-1257",	NULL} },	/* Latvian */
+	LANG_ENCODINGS ("et",      "iso-8859-4", "windows-1257"),          /* Estonian */
+	LANG_ENCODINGS ("lt",      "iso-8859-4", "windows-1257"),          /* Lithuanian */
+	LANG_ENCODINGS ("lv",      "iso-8859-4", "windows-1257"),          /* Latvian */
 
 	/* Greek */
-	{ "el",		{"iso-8859-7",	"windows-1253",	NULL} },
+	LANG_ENCODINGS ("el",      "iso-8859-7","windows-1253"),
 
 	/* Hebrew */
-	{ "he",		{"iso-8859-8",	"windows-1255",	NULL} },
-	{ "iw",		{"iso-8859-8",	"windows-1255",	NULL} },
+	LANG_ENCODINGS ("he",      "iso-8859-8", "windows-1255"),
+	LANG_ENCODINGS ("iw",      "iso-8859-8", "windows-1255"),
 
 	/* Turkish */
-	{ "tr",		{"iso-8859-9",	"windows-1254",	NULL} },
+	LANG_ENCODINGS ("tr",      "iso-8859-9", "windows-1254"),
 
 	/* Table end */
-	{ NULL, {NULL, NULL, NULL} }
+	LANG_ENCODINGS (NULL, NULL)
 };
 
 
@@ -155,7 +151,7 @@ init_lang_to_encodings_hash (void)
 		langToEncodings5 = g_hash_table_new (g_str_hash, g_str_equal);
 		while (enc->lang) {
 			g_hash_table_insert (langToEncodings5, (gpointer) enc->lang,
-			                     (gpointer) &enc->encodings);
+			                     (gpointer) enc->encodings);
 			enc++;
 		}
 	}
@@ -166,54 +162,73 @@ init_lang_to_encodings_hash (void)
 		langToEncodings2 = g_hash_table_new (g_str_hash, g_str_equal);
 		while (enc->lang) {
 			g_hash_table_insert (langToEncodings2, (gpointer) enc->lang,
-			                     (gpointer) &enc->encodings);
+			                     (gpointer) enc->encodings);
 			enc++;
 		}
 	}
 }
 
-
 static gboolean
-get_encodings_for_lang (const char *lang,
-                        char **encoding1,
-                        char **encoding2,
-                        char **encoding3)
+get_encodings_for_lang (const char *lang, const char *const **encodings)
 {
-	struct EncodingTriplet *encodings;
-	gboolean success = FALSE;
-	char *tmp_lang;
+	gs_free char *tmp_lang = NULL;
 
-	g_return_val_if_fail (lang != NULL, FALSE);
-	g_return_val_if_fail (encoding1 != NULL, FALSE);
-	g_return_val_if_fail (encoding2 != NULL, FALSE);
-	g_return_val_if_fail (encoding3 != NULL, FALSE);
-
-	*encoding1 = "iso-8859-1";
-	*encoding2 = "windows-1251";
-	*encoding3 = NULL;
+	g_return_val_if_fail (lang, FALSE);
+	g_return_val_if_fail (encodings, FALSE);
 
 	init_lang_to_encodings_hash ();
 
-	tmp_lang = g_strdup (lang);
-	if ((encodings = g_hash_table_lookup (langToEncodings5, tmp_lang))) {
-		*encoding1 = (char *) encodings->encoding1;
-		*encoding2 = (char *) encodings->encoding2;
-		*encoding3 = (char *) encodings->encoding3;
-		success = TRUE;
-	}
+	if ((*encodings = g_hash_table_lookup (langToEncodings5, lang)))
+		return TRUE;
 
 	/* Truncate tmp_lang to length of 2 */
-	if (strlen (tmp_lang) > 2)
+	if (strlen (lang) > 2) {
+		tmp_lang = g_strdup (lang);
 		tmp_lang[2] = '\0';
-	if (!success && (encodings = g_hash_table_lookup (langToEncodings2, tmp_lang))) {
-		*encoding1 = (char *) encodings->encoding1;
-		*encoding2 = (char *) encodings->encoding2;
-		*encoding3 = (char *) encodings->encoding3;
-		success = TRUE;
+		if ((*encodings = g_hash_table_lookup (langToEncodings2, tmp_lang)))
+			return TRUE;
 	}
 
-	g_free (tmp_lang);
-	return success;
+	return FALSE;
+}
+
+static const char *const *
+get_system_encodings (void)
+{
+	static const char *const *cached_encodings;
+	static char *default_encodings[4];
+	const char *const *encodings = NULL;
+	char *lang;
+
+	if (cached_encodings)
+		return cached_encodings;
+
+	/* Use environment variables as encoding hint */
+	lang = getenv ("LC_ALL");
+	if (!lang)
+		lang = getenv ("LC_CTYPE");
+	if (!lang)
+		lang = getenv ("LANG");
+	if (lang) {
+		char *dot;
+
+		lang = g_ascii_strdown (lang, -1);
+		if ((dot = strchr (lang, '.')))
+			*dot = '\0';
+
+		get_encodings_for_lang (lang, &encodings);
+		g_free (lang);
+	}
+	if (!encodings) {
+		g_get_charset ((const char **) &default_encodings[0]);
+		default_encodings[1] = "iso-8859-1";
+		default_encodings[2] = "windows-1251";
+		default_encodings[3] = NULL;
+		encodings = (const char *const *) default_encodings;
+	}
+
+	cached_encodings = encodings;
+	return cached_encodings;
 }
 
 /* init libnm */
@@ -282,37 +297,26 @@ gboolean _nm_utils_is_manager_process;
 char *
 nm_utils_ssid_to_utf8 (const guint8 *ssid, gsize len)
 {
+	const char *const *encodings;
+	const char *const *e;
 	char *converted = NULL;
-	char *lang, *e1 = NULL, *e2 = NULL, *e3 = NULL;
 
 	g_return_val_if_fail (ssid != NULL, NULL);
 
 	if (g_utf8_validate ((const gchar *) ssid, len, NULL))
 		return g_strndup ((const gchar *) ssid, len);
 
-	/* LANG may be a good encoding hint */
-	g_get_charset ((const char **)(&e1));
-	if ((lang = getenv ("LANG"))) {
-		char * dot;
+	encodings = get_system_encodings ();
 
-		lang = g_ascii_strdown (lang, -1);
-		if ((dot = strchr (lang, '.')))
-			*dot = '\0';
-
-		get_encodings_for_lang (lang, &e1, &e2, &e3);
-		g_free (lang);
+	for (e = encodings; *e; e++) {
+		converted = g_convert ((const gchar *) ssid, len, "UTF-8", *e, NULL, NULL, NULL);
+		if (converted)
+			break;
 	}
-
-	converted = g_convert ((const gchar *) ssid, len, "UTF-8", e1, NULL, NULL, NULL);
-	if (!converted && e2)
-		converted = g_convert ((const gchar *) ssid, len, "UTF-8", e2, NULL, NULL, NULL);
-
-	if (!converted && e3)
-		converted = g_convert ((const gchar *) ssid, len, "UTF-8", e3, NULL, NULL, NULL);
 
 	if (!converted) {
 		converted = g_convert_with_fallback ((const gchar *) ssid, len,
-		                                     "UTF-8", e1, "?", NULL, NULL, NULL);
+		                                     "UTF-8", encodings[0], "?", NULL, NULL, NULL);
 	}
 
 	if (!converted) {
@@ -326,7 +330,7 @@ nm_utils_ssid_to_utf8 (const guint8 *ssid, gsize len)
 		                     "ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
 		                     "abcdefghijklmnopqrstuvwxyz{|}~";
 
-		converted = g_strndup ((const gchar *)ssid, len);
+		converted = g_strndup ((const char *) ssid, len);
 		g_strcanon (converted, valid_chars, '?');
 	}
 
@@ -1490,9 +1494,8 @@ nm_utils_ip4_netmask_to_prefix (guint32 netmask)
 guint32
 nm_utils_ip4_prefix_to_netmask (guint32 prefix)
 {
-	return prefix < 32 ? ~htonl(0xFFFFFFFF >> prefix) : 0xFFFFFFFF;
+	return _nm_utils_ip4_prefix_to_netmask (prefix);
 }
-
 
 /**
  * nm_utils_ip4_get_default_prefix:
@@ -1509,12 +1512,7 @@ nm_utils_ip4_prefix_to_netmask (guint32 prefix)
 guint32
 nm_utils_ip4_get_default_prefix (guint32 ip)
 {
-	if (((ntohl (ip) & 0xFF000000) >> 24) <= 127)
-		return 8;  /* Class A - 255.0.0.0 */
-	else if (((ntohl (ip) & 0xFF000000) >> 24) <= 191)
-		return 16;  /* Class B - 255.255.0.0 */
-
-	return 24;  /* Class C - 255.255.255.0 */
+	return _nm_utils_ip4_get_default_prefix (ip);
 }
 
 /**
@@ -3678,36 +3676,41 @@ _nm_utils_generate_mac_address_mask_parse (const char *value,
 gboolean
 nm_utils_is_valid_iface_name (const char *name, GError **error)
 {
-	g_return_val_if_fail (name != NULL, FALSE);
+	int i;
 
-	if (*name == '\0') {
+	g_return_val_if_fail (name, FALSE);
+
+	if (name[0] == '\0') {
 		g_set_error_literal (error, NM_UTILS_ERROR, NM_UTILS_ERROR_UNKNOWN,
 		                     _("interface name is too short"));
 		return FALSE;
 	}
 
-	if (strlen (name) >= 16) {
-		g_set_error_literal (error, NM_UTILS_ERROR, NM_UTILS_ERROR_UNKNOWN,
-		                     _("interface name is longer than 15 characters"));
-		return FALSE;
-	}
-
-	if (!strcmp (name, ".") || !strcmp (name, "..")) {
+	if (   name[0] == '.'
+	    && (   name[1] == '\0'
+	        || (   name[1] == '.'
+	            && name[2] == '\0'))) {
 		g_set_error_literal (error, NM_UTILS_ERROR, NM_UTILS_ERROR_UNKNOWN,
 		                     _("interface name is reserved"));
 		return FALSE;
 	}
 
-	while (*name) {
-		if (*name == '/' || g_ascii_isspace (*name)) {
+	for (i = 0; i < IFNAMSIZ; i++) {
+		char ch = name[i];
+
+		if (ch == '\0')
+			return TRUE;
+		if (   NM_IN_SET (ch, '/', ':')
+		    || g_ascii_isspace (ch)) {
 			g_set_error_literal (error, NM_UTILS_ERROR, NM_UTILS_ERROR_UNKNOWN,
 			                     _("interface name contains an invalid character"));
 			return FALSE;
 		}
-		name++;
 	}
 
-	return TRUE;
+	g_set_error_literal (error, NM_UTILS_ERROR, NM_UTILS_ERROR_UNKNOWN,
+	                     _("interface name is longer than 15 characters"));
+	return FALSE;
 }
 
 /**
@@ -4009,28 +4012,29 @@ guint
 _nm_utils_strstrdictkey_hash (gconstpointer a)
 {
 	const NMUtilsStrStrDictKey *k = a;
-	const signed char *p;
-	guint32 h = 5381;
+	const char *p;
+	NMHashState h;
 
+	nm_hash_init (&h, 76642997u);
 	if (k) {
 		if (((int) k->type) & ~STRSTRDICTKEY_ALL_SET)
 			g_return_val_if_reached (0);
 
-		h = NM_HASH_COMBINE (h, k->type);
+		nm_hash_update_val (&h, k->type);
 		if (k->type & STRSTRDICTKEY_ALL_SET) {
-			p = (void *) k->data;
-			for (; *p != '\0'; p++)
-				h = NM_HASH_COMBINE (h, *p);
+			gsize n;
+
+			n = 0;
+			p = strchr (k->data, '\0');
 			if (k->type == STRSTRDICTKEY_ALL_SET) {
 				/* the key contains two strings. Continue... */
-				h = NM_HASH_COMBINE (h, '\0');
-				for (p++; *p != '\0'; p++)
-					h = NM_HASH_COMBINE (h, *p);
+				p = strchr (p + 1, '\0');
 			}
+			if (p != k->data)
+				nm_hash_update (&h, k->data, p - k->data);
 		}
 	}
-
-	return h;
+	return nm_hash_complete (&h);
 }
 
 gboolean
@@ -4195,11 +4199,11 @@ out:
  * Returns: the index of the option in the array or -1 if was not
  * found.
  */
-int _nm_utils_dns_option_find_idx (GPtrArray *array, const char *option)
+gssize _nm_utils_dns_option_find_idx (GPtrArray *array, const char *option)
 {
 	gboolean ret;
 	char *option_name, *tmp_name;
-	int i;
+	guint i;
 
 	if (!_nm_utils_dns_option_validate (option, &option_name, NULL, FALSE, NULL))
 		return -1;
@@ -4357,6 +4361,7 @@ _nm_utils_team_config_equal (const char *conf1,
                              gboolean port_config)
 {
 	json_t *json1 = NULL, *json2 = NULL, *json;
+	json_t *array, *name;
 	gs_free char *dump1 = NULL, *dump2 = NULL;
 	json_t *value, *property;
 	json_error_t jerror;
@@ -4396,6 +4401,16 @@ _nm_utils_team_config_equal (const char *conf1,
 				property = json_object ();
 				json_object_set_new (property, "name", json_string ("roundrobin"));
 				json_object_set_new (json, "runner", property);
+			} else if (   (name = json_object_get (property, "name"))
+			           && NM_IN_STRSET (json_string_value (name), "lacp", "loadbalance")) {
+				/* Add default tx_hash when missing */
+				if (!json_object_get (property, "tx_hash")) {
+					array = json_array ();
+					json_array_append_new (array, json_string ("eth"));
+					json_array_append_new (array, json_string ("ipv4"));
+					json_array_append_new (array, json_string ("ipv6"));
+					json_object_set_new (property, "tx_hash", array);
+				}
 			}
 		}
 	}
